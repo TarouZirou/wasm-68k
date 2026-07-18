@@ -8,6 +8,14 @@
       "models": ["x68000", "xvi", "x68030"],
       "status": "pass",
       "notes": "Self-authored public software generated in-browser. Validates CPU execution, CRTC raster IRQ, GVRAM/TVRAM/sprite composition, HD63450 DMA, FDC/XDF, SASI or internal SCSI/HDF, YM2151, MSM6258, MIDI and the render path without copyrighted assets."
+    },
+    {
+      "id": "chorensha-68k-1-10",
+      "title": "Cho Ren Sha 68K ver1.10",
+      "license": "Freeware (user-supplied test image; not redistributed)",
+      "models": ["x68000"],
+      "status": "pass",
+      "notes": "Manual regression for SHA-256 6d8169ef89654fd7986b65eecfb5444dc496ac8e2f888b385a6b531ea3ef2146. Boots past the 128 KiB fixed-buffer message to the credits screen and accepts X68000 Space make/break input to reach the ver1.10 information screen. CI covers the underlying active-low MFP GPIP HSync edges with a synthetic bus test; the disk image is never committed."
     }
   ]
 }

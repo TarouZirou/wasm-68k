@@ -58,9 +58,9 @@ impl Mfp {
             0 => gpip,
             RSR => {
                 if self.serial.is_empty() {
-                    self.regs[RSR] | 0x80
-                } else {
                     self.regs[RSR] & 0x7f
+                } else {
+                    self.regs[RSR] | 0x80
                 }
             }
             UDR => {
@@ -234,5 +234,15 @@ mod tests {
         assert!(mfp.has_interrupt(), "second byte must remain interruptible");
         assert!(mfp.acknowledge().is_some());
         assert_eq!(mfp.read(0x2f, 0xff), 0x9e);
+    }
+
+    #[test]
+    fn receive_status_reports_buffer_full_only_while_data_is_queued() {
+        let mut mfp = Mfp::default();
+        assert_eq!(mfp.read(0x2b, 0xff) & 0x80, 0);
+        mfp.receive_keyboard(0x2a);
+        assert_eq!(mfp.read(0x2b, 0xff) & 0x80, 0x80);
+        assert_eq!(mfp.read(0x2f, 0xff), 0x2a);
+        assert_eq!(mfp.read(0x2b, 0xff) & 0x80, 0);
     }
 }

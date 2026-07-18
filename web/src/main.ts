@@ -1,5 +1,6 @@
 import init, { WebX68k } from "./wasm/x68k_wasm.js";
 import { createDiagnosticHdf, createDiagnosticIpl, createDiagnosticXdf } from "./diagnostic.js";
+import { decodeKeyMap, defaultKeyMap, encodeKeyMap, isKeyMap } from "./keyboard.js";
 
 type LoadTarget = "ipl" | "cgrom" | "scsi" | `fdd${0 | 1 | 2 | 3}` | "hdd0" | "state";
 // wasm-pack生成物がエディタ上で一世代古くても、Rust側の安定公開APIを型として
@@ -9,20 +10,9 @@ type Emulator = WebX68k & {
   set_volume(volume: number): void;
 };
 
-const defaultKeyMap: Readonly<Record<string, number>> = {
-  Escape: 0x01, Digit1: 0x02, Digit2: 0x03, Digit3: 0x04, Digit4: 0x05,
-  Digit5: 0x06, Digit6: 0x07, Digit7: 0x08, Digit8: 0x09, Digit9: 0x0a,
-  Digit0: 0x0b, Minus: 0x0c, Equal: 0x0d, Backspace: 0x0e, Tab: 0x0f,
-  KeyQ: 0x10, KeyW: 0x11, KeyE: 0x12, KeyR: 0x13, KeyT: 0x14, KeyY: 0x15,
-  KeyU: 0x16, KeyI: 0x17, KeyO: 0x18, KeyP: 0x19, Enter: 0x1c,
-  ControlLeft: 0x1d, KeyA: 0x1e, KeyS: 0x1f, KeyD: 0x20, KeyF: 0x21,
-  KeyG: 0x22, KeyH: 0x23, KeyJ: 0x24, KeyK: 0x25, KeyL: 0x26,
-  ShiftLeft: 0x2a, KeyZ: 0x2c, KeyX: 0x2d, KeyC: 0x2e, KeyV: 0x2f,
-  KeyB: 0x30, KeyN: 0x31, KeyM: 0x32, ShiftRight: 0x36, AltLeft: 0x38,
-  Space: 0x39, ArrowUp: 0x48, ArrowLeft: 0x4b, ArrowRight: 0x4d, ArrowDown: 0x50,
-  F1: 0x3b, F2: 0x3c, F3: 0x3d, F4: 0x3e, F5: 0x3f,
-};
 let keyMap: Record<string, number> = { ...defaultKeyMap };
+const pressedKeys = new Map<string, number>();
+const pressedMouseButtons = new Set<number>();
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -193,6 +183,7 @@ async function createEmulator(): Promise<void> {
   canvas.dataset.emulatorReady = "false";
   backend.textContent = "初期化中…";
   if (emulator) {
+    releaseTransientInputs();
     await dbPut(`sram:${activeModel}`, emulator.export_sram()).catch(console.warn);
     for (const target of [...mountedNames.keys()]) exportMounted(target, true);
     emulator.free();
@@ -329,7 +320,10 @@ async function enableMidi(): Promise<void> {
 
 function pollGamepad(): void {
   const pad = navigator.getGamepads()[0];
-  if (!pad) return;
+  if (!pad) {
+    releaseGamepad();
+    return;
+  }
   pad.buttons.forEach((button, index) => {
     if (lastGamepadButtons[index] !== button.pressed) {
       emulator.set_joystick_button(0, index, button.pressed);
@@ -342,6 +336,17 @@ function pollGamepad(): void {
       lastGamepadAxes[index] = axis;
     }
   });
+}
+
+function releaseGamepad(): void {
+  lastGamepadButtons.forEach((pressed, index) => {
+    if (pressed && emulator) emulator.set_joystick_button(0, index, false);
+  });
+  lastGamepadAxes.forEach((axis, index) => {
+    if (axis !== 0 && emulator) emulator.set_joystick_axis(0, index, 0);
+  });
+  lastGamepadButtons = [];
+  lastGamepadAxes = [];
 }
 
 function download(name: string, bytes: string | Uint8Array, type = "application/octet-stream"): void {
@@ -425,8 +430,9 @@ async function restoreSettings(): Promise<void> {
   if (savedMap) {
     try {
       const candidate = JSON.parse(new TextDecoder().decode(savedMap)) as unknown;
-      if (!isKeyMap(candidate)) throw new Error("invalid persisted keymap");
-      keyMap = candidate;
+      const restored = decodeKeyMap(candidate);
+      keyMap = restored.keyMap;
+      if (restored.migrated) await dbPut("keymap", encodeKeyMap(keyMap));
     } catch (error) {
       console.warn("破損したキーマップを無視しました", error);
     }
@@ -441,9 +447,38 @@ function restoreRange(id: string, value: unknown): void {
   if (numeric >= Number(input.min) && numeric <= Number(input.max)) input.value = value;
 }
 
-function isKeyMap(value: unknown): value is Record<string, number> {
-  return typeof value === "object" && value !== null && !Array.isArray(value) &&
-    Object.values(value).every((scan) => Number.isInteger(scan) && scan >= 0 && scan <= 255);
+function keyDown(event: KeyboardEvent): void {
+  if (document.activeElement !== canvas) return;
+  const scancode = keyMap[event.code];
+  if (scancode === undefined) return;
+  event.preventDefault();
+  if (!pressedKeys.has(event.code)) pressedKeys.set(event.code, scancode);
+  // 実機キーボードのtypematic相当としてブラウザのrepeat makeも配送する。
+  emulator.set_key(scancode, true);
+}
+
+function keyUp(event: KeyboardEvent): void {
+  const scancode = pressedKeys.get(event.code);
+  if (scancode === undefined) return;
+  event.preventDefault();
+  pressedKeys.delete(event.code);
+  if (![...pressedKeys.values()].includes(scancode)) emulator.set_key(scancode, false);
+}
+
+function releaseAllKeys(): void {
+  if (emulator) {
+    for (const scancode of new Set(pressedKeys.values())) emulator.set_key(scancode, false);
+  }
+  pressedKeys.clear();
+}
+
+function releaseTransientInputs(): void {
+  releaseAllKeys();
+  if (emulator) {
+    for (const button of pressedMouseButtons) emulator.set_mouse_button(button, false);
+  }
+  pressedMouseButtons.clear();
+  releaseGamepad();
 }
 
 function wireUi(): void {
@@ -503,11 +538,23 @@ function wireUi(): void {
     void files.reduce((promise, file) => promise.then(() => loadFile(file, inferTarget(file))), Promise.resolve()).catch(showError);
   });
   canvas.addEventListener("mousemove", (event) => { if (document.pointerLockElement === canvas) emulator.set_mouse_delta(event.movementX, event.movementY); });
-  canvas.addEventListener("mousedown", (event) => { canvas.focus(); emulator.set_mouse_button(event.button, true); });
-  canvas.addEventListener("mouseup", (event) => emulator.set_mouse_button(event.button, false));
+  canvas.addEventListener("mousedown", (event) => {
+    canvas.focus();
+    pressedMouseButtons.add(event.button);
+    emulator.set_mouse_button(event.button, true);
+  });
+  window.addEventListener("mouseup", (event) => {
+    if (!pressedMouseButtons.delete(event.button)) return;
+    emulator.set_mouse_button(event.button, false);
+  });
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("dblclick", () => void canvas.requestPointerLock());
-  window.addEventListener("keydown", (event) => { if (document.activeElement === canvas && keyMap[event.code] !== undefined) { event.preventDefault(); emulator.set_key(keyMap[event.code], true); } });
-  window.addEventListener("keyup", (event) => { if (keyMap[event.code] !== undefined) emulator.set_key(keyMap[event.code], false); });
+  window.addEventListener("keydown", keyDown);
+  window.addEventListener("keyup", keyUp);
+  window.addEventListener("blur", releaseTransientInputs);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") releaseTransientInputs();
+  });
   $<HTMLButtonElement>("audio").onclick = () => void startAudio().catch(showError);
   $<HTMLButtonElement>("midi").onclick = () => void enableMidi().catch(showError);
   $<HTMLInputElement>("volume").oninput = (event) => {
@@ -518,10 +565,19 @@ function wireUi(): void {
   $<HTMLButtonElement>("apply-keymap").onclick = () => {
     try {
       const value = JSON.parse($<HTMLTextAreaElement>("keymap").value) as Record<string, number>;
-      if (!isKeyMap(value)) throw new Error("キーマップはキー名と0〜255の整数scancodeで指定してください");
+      if (!isKeyMap(value)) throw new Error("キーマップはキー名と0〜127の整数scancodeで指定してください");
+      releaseAllKeys();
       keyMap = value;
-      void dbPut("keymap", new TextEncoder().encode(JSON.stringify(value))).then(() => message("キーマップを保存しました")).catch(showError);
+      void dbPut("keymap", encodeKeyMap(value)).then(() => message("キーマップを保存しました")).catch(showError);
     } catch (error) { showError(error); }
+  };
+  $<HTMLButtonElement>("reset-keymap").onclick = () => {
+    releaseAllKeys();
+    keyMap = { ...defaultKeyMap };
+    $<HTMLTextAreaElement>("keymap").value = JSON.stringify(keyMap, null, 2);
+    void dbPut("keymap", encodeKeyMap(keyMap))
+      .then(() => message("X68000既定キーマップへ戻しました"))
+      .catch(showError);
   };
   const stateSlot = () => $<HTMLSelectElement>("state-slot").value;
   $<HTMLButtonElement>("save-state").onclick = () => void dbPut(`state:${model.value}:${stateSlot()}`, emulator.save_state()).then(() => message(`保存状態スロット${stateSlot()}へ保存しました`)).catch(showError);

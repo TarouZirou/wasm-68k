@@ -127,6 +127,49 @@ test("settings persist in IndexedDB and the renderer resizes", async ({ page }) 
     .not.toBe(before);
 });
 
+test("X68000 keyboard map replaces legacy PC scan codes", async ({ page }) => {
+  await page.goto("/wasm-68k/");
+  await expect(page.locator("#status")).toContainText("準備完了");
+  const keyMap = JSON.parse(await page.locator("#keymap").inputValue()) as Record<string, number>;
+  expect(keyMap).toMatchObject({
+    Enter: 0x1d,
+    KeyZ: 0x2a,
+    KeyX: 0x2b,
+    Space: 0x35,
+    ArrowLeft: 0x3b,
+    ArrowUp: 0x3c,
+    ArrowRight: 0x3d,
+    ArrowDown: 0x3e,
+    F1: 0x63,
+    ShiftLeft: 0x70,
+    ControlLeft: 0x71,
+  });
+
+  // 旧版が保存したPC/ATコード表を再現し、reload時の自動移行を確認する。
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("wasm-68k", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const request = db.transaction("data", "readwrite").objectStore("data").put(
+        new TextEncoder().encode(JSON.stringify({ Enter: 0x1c, Space: 0x39, ArrowUp: 0x48, F1: 0x3b })),
+        "keymap",
+      );
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+  });
+  await page.reload();
+  await expect(page.locator("#status")).toContainText("準備完了");
+  const migrated = JSON.parse(await page.locator("#keymap").inputValue()) as Record<string, number>;
+  expect(migrated.Enter).toBe(0x1d);
+  expect(migrated.ArrowUp).toBe(0x3c);
+  expect(migrated.F1).toBe(0x63);
+});
+
 test("drag-and-drop mounts HDF and X68S state round-trips", async ({ page }) => {
   await page.goto("/wasm-68k/?autopause=1");
   await expect(page.locator("#status")).toContainText("準備完了");

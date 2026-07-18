@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use x68k_core::{DriveId, Machine, MachineConfig, MachineModel, MediaFormat, RomKind};
+use x68k_core::{DriveId, InputEvent, Machine, MachineConfig, MachineModel, MediaFormat, RomKind};
 
 fn main() {
     let mut arguments = std::env::args().skip(1);
@@ -23,7 +23,10 @@ fn main() {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or_else(|| if model == MachineModel::X68030 { 12 } else { 2 });
     let ipl = fs::read(root.join("web/public/sharp").join(ipl_name)).expect("official IPL");
-    let human = fs::read(root.join("web/public/sharp/HUMAN302.XDF")).expect("official Human68k");
+    let floppy_path = std::env::var_os("X68K_FDD0")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("web/public/sharp/HUMAN302.XDF"));
+    let floppy = fs::read(&floppy_path).expect("FDD0 image");
     let mut machine = Machine::new(MachineConfig {
         model,
         ram_bytes: ram_mib * 1024 * 1024,
@@ -48,8 +51,9 @@ fn main() {
         println!("loaded local internal SCSI ROM");
     }
     machine
-        .mount_media(DriveId::Floppy(0), MediaFormat::Xdf, &human, true)
-        .expect("mount Human68k");
+        .mount_media(DriveId::Floppy(0), MediaFormat::Xdf, &floppy, true)
+        .expect("mount FDD0");
+    println!("mounted FDD0 {}", floppy_path.display());
     machine.load_rom(RomKind::Ipl, &ipl).expect("load IPL");
 
     let (initial_pc, initial_sr, _, initial_sp, _) = machine.cpu_diagnostics();
@@ -59,9 +63,31 @@ fn main() {
 
     let mut previous = (0, 0);
     let trace_every_frame = std::env::var_os("X68K_TRACE_EVERY").is_some();
+    let trace_from = std::env::var("X68K_TRACE_FROM")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1);
+    let key_at = std::env::var("X68K_KEY_AT")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok());
+    let key_scancode = std::env::var("X68K_KEY_SCANCODE")
+        .ok()
+        .and_then(|value| u8::from_str_radix(value.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0x35);
     for frame in 1..=frames {
+        if key_at == Some(frame) {
+            machine.input(InputEvent::Key {
+                scancode: key_scancode,
+                pressed: true,
+            });
+        } else if key_at.is_some_and(|at| frame == at.saturating_add(1)) {
+            machine.input(InputEvent::Key {
+                scancode: key_scancode,
+                pressed: false,
+            });
+        }
         let result = machine.run_frame();
-        if trace_every_frame
+        if trace_every_frame && frame >= trace_from
             || (result.width, result.height) != previous
             || matches!(frame, 1 | 2 | 5 | 10 | 30 | 60 | 120 | 180)
             || frame == frames

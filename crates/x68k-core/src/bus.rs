@@ -301,6 +301,7 @@ impl Bus {
         self.devices.midi.tick(cycles, self.clock_hz);
         for event in self.scheduler.advance(cycles) {
             match event {
+                Event::HorizontalSync => {}
                 Event::Scanline => {
                     for signal in self.devices.crtc.next_scanline() {
                         if signal == Signal::VerticalSync {
@@ -835,9 +836,12 @@ impl Bus {
             AREA_BASE..=0xe8_7fff => return Some(0xff),
             MFP_BASE..=0xe8_9fff => {
                 return Some(
-                    self.devices
-                        .mfp
-                        .read(address - MFP_BASE, self.devices.crtc.gpip()),
+                    self.devices.mfp.read(
+                        address - MFP_BASE,
+                        self.devices
+                            .crtc
+                            .gpip(self.scheduler.horizontal_sync_high()),
+                    ),
                 );
             }
             RTC_BASE..=0xe8_bfff => {
@@ -1239,6 +1243,28 @@ mod tests {
         assert!(bus.try_read_byte(CGROM_BASE + CGROM_SIZE).is_err());
         bus.cgrom = vec![0xa5; CGROM_SIZE as usize];
         assert_eq!(bus.try_read_byte(CGROM_BASE + 123).unwrap(), 0xa5);
+    }
+
+    #[test]
+    fn mfp_gpip_exposes_horizontal_sync_edges() {
+        let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
+        assert_ne!(bus.read_io(MFP_BASE + 1).unwrap() & 0x80, 0);
+
+        let until_sync = bus.scheduler.cycles_until_next_event();
+        bus.tick(until_sync);
+        assert_eq!(
+            bus.read_io(MFP_BASE + 1).unwrap() & 0x80,
+            0,
+            "HSync pulse must become active-low so polling software can observe it"
+        );
+
+        let until_line_end = bus.scheduler.cycles_until_next_event();
+        bus.tick(until_line_end);
+        assert_ne!(
+            bus.read_io(MFP_BASE + 1).unwrap() & 0x80,
+            0,
+            "HSync must return high at the scanline boundary"
+        );
     }
 
     #[test]

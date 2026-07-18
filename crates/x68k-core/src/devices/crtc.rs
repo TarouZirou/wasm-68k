@@ -165,13 +165,13 @@ impl Crtc {
         )
     }
 
-    pub(crate) fn gpip(&self) -> u8 {
+    pub(crate) fn gpip(&self, horizontal_sync_high: bool) -> u8 {
         let visible = (self.v_start..self.v_end).contains(&self.current_line);
         let mut value = 0x20 | if visible { 0x13 } else { 0x03 };
         if self.current_line != self.raster_line {
             value |= 0x40;
         }
-        value | 0x80
+        value | if horizontal_sync_high { 0x80 } else { 0 }
     }
 
     fn pair(&self, register: usize) -> u16 {

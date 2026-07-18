@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Event {
     Scanline,
+    HorizontalSync,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +68,17 @@ impl Scheduler {
             .unwrap_or(u32::MAX)
     }
 
+    /// MFP GPIP bit 7へ入力する水平同期レベル。
+    ///
+    /// 次のイベントが同期パルス開始なら現在はhigh、走査線終端なら現在はlow。
+    /// イベント境界でCPU実行を区切るため、guestのbusy loopからも両edgeを観測できる。
+    pub(crate) fn horizontal_sync_high(&self) -> bool {
+        self.events
+            .first_key_value()
+            .and_then(|(_, events)| events.first())
+            .is_none_or(|event| *event == Event::HorizontalSync)
+    }
+
     pub(crate) fn set_video_timing(&mut self, lines: u16, high_resolution: bool) {
         let lines = lines.max(1);
         if self.lines_per_frame != lines || self.high_resolution != high_resolution {
@@ -95,8 +107,16 @@ impl Scheduler {
         self.line_phase = self.line_phase.saturating_add(numerator % denominator);
         let carry = self.line_phase / denominator;
         self.line_phase %= denominator;
+        let line_cycles = base.saturating_add(carry);
+        // 水平同期は走査線末尾の短いactive-low pulseとして扱う。正確な幅より、
+        // GPIPをpollするソフトが両edgeを決定論的に観測できることを優先する。
+        let sync_at = from.saturating_add((line_cycles.saturating_mul(7) / 8).max(1));
         self.events
-            .entry(from.saturating_add(base).saturating_add(carry))
+            .entry(sync_at)
+            .or_default()
+            .push(Event::HorizontalSync);
+        self.events
+            .entry(from.saturating_add(line_cycles))
             .or_default()
             .push(Event::Scanline);
     }
@@ -109,32 +129,58 @@ mod tests {
     #[test]
     fn preserves_fractional_scanline_cycles_without_drift() {
         let mut scheduler = Scheduler::new(10_000_000);
-        assert!(scheduler.advance(285).is_empty());
+        assert_eq!(scheduler.advance(250), vec![Event::HorizontalSync]);
+        assert!(!scheduler.horizontal_sync_high());
+        assert!(scheduler.advance(35).is_empty());
         assert_eq!(scheduler.advance(1), vec![Event::Scanline]);
+        assert!(scheduler.horizontal_sync_high());
         let events = scheduler.advance(162_421);
-        assert_eq!(events.len(), 567);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == Event::Scanline)
+                .count(),
+            567
+        );
     }
 
     #[test]
     fn a_large_slice_delivers_every_due_event() {
         let mut scheduler = Scheduler::new(10_000_000);
-        assert_eq!(scheduler.advance(162_707).len(), 568);
+        let events = scheduler.advance(162_707);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == Event::Scanline)
+                .count(),
+            568
+        );
+        assert_eq!(events.len(), 568 * 2);
     }
 
     #[test]
     fn exposes_exact_next_event_boundary() {
         let mut scheduler = Scheduler::new(10_000_000);
-        assert_eq!(scheduler.cycles_until_next_event(), 286);
+        assert_eq!(scheduler.cycles_until_next_event(), 250);
         assert!(scheduler.advance(100).is_empty());
-        assert_eq!(scheduler.cycles_until_next_event(), 186);
-        assert_eq!(scheduler.advance(186), vec![Event::Scanline]);
-        assert!(scheduler.cycles_until_next_event() >= 286);
+        assert_eq!(scheduler.cycles_until_next_event(), 150);
+        assert_eq!(scheduler.advance(150), vec![Event::HorizontalSync]);
+        assert_eq!(scheduler.cycles_until_next_event(), 36);
+        assert_eq!(scheduler.advance(36), vec![Event::Scanline]);
+        assert!(scheduler.cycles_until_next_event() >= 250);
     }
 
     #[test]
     fn high_resolution_and_machine_clock_scale_without_drift() {
         let mut scheduler = Scheduler::new(25_000_000);
         scheduler.set_video_timing(568, true);
-        assert_eq!(scheduler.advance(450_775).len(), 568);
+        assert_eq!(
+            scheduler
+                .advance(450_775)
+                .iter()
+                .filter(|event| **event == Event::Scanline)
+                .count(),
+            568
+        );
     }
 }
