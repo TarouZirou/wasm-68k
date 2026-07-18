@@ -30,7 +30,7 @@ impl Scheduler {
             line_phase: 0,
             events: BTreeMap::new(),
         };
-        scheduler.schedule_next_scanline(0);
+        scheduler.schedule_line_events(0);
         scheduler
     }
 
@@ -41,17 +41,14 @@ impl Scheduler {
     pub(crate) fn advance(&mut self, cycles: u32) -> Vec<Event> {
         self.now = self.now.saturating_add(u64::from(cycles));
         let mut due = Vec::new();
-        loop {
-            let Some((&at, _)) = self.events.first_key_value() else {
-                break;
-            };
+        while let Some((&at, _)) = self.events.first_key_value() {
             if at > self.now {
                 break;
             }
             let events = self.events.remove(&at).unwrap_or_default();
             for event in events {
                 if event == Event::Scanline {
-                    self.schedule_next_scanline(at);
+                    self.schedule_line_events(at);
                 }
                 due.push(event);
             }
@@ -88,11 +85,11 @@ impl Scheduler {
             // 旧タイミングで予約済みの次走査線を破棄する。CRTC設定変更時点から
             // 新タイミングを適用し、1走査線分の古い周期を残さない。
             self.events.clear();
-            self.schedule_next_scanline(self.now);
+            self.schedule_line_events(self.now);
         }
     }
 
-    fn schedule_next_scanline(&mut self, from: u64) {
+    fn schedule_line_events(&mut self, from: u64) {
         // 映像発振器はCPUクロックと独立している。10MHz機換算の1フレーム
         // 周期を機種別CPUクロックへ有理数で換算し、端数を累積する。
         const REFERENCE_CPU_HZ: u64 = 10_000_000;

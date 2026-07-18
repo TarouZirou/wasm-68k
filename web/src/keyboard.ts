@@ -35,6 +35,32 @@ export const defaultKeyMap: Readonly<Record<string, number>> = {
   PrintScreen: 0x72, AltLeft: 0x72, Pause: 0x73, AltRight: 0x73,
 };
 
+export class PressedKeyState {
+  private readonly byHostCode = new Map<string, number>();
+
+  press(hostCode: string, keyMap: Readonly<Record<string, number>>): number | undefined {
+    const scancode = this.byHostCode.get(hostCode) ?? keyMap[hostCode];
+    if (scancode !== undefined) this.byHostCode.set(hostCode, scancode);
+    return scancode;
+  }
+
+  release(hostCode: string): { scancode: number; sendBreak: boolean } | undefined {
+    const scancode = this.byHostCode.get(hostCode);
+    if (scancode === undefined) return undefined;
+    this.byHostCode.delete(hostCode);
+    for (const remaining of this.byHostCode.values()) {
+      if (remaining === scancode) return { scancode, sendBreak: false };
+    }
+    return { scancode, sendBreak: true };
+  }
+
+  drain(): number[] {
+    const scancodes = [...new Set(this.byHostCode.values())];
+    this.byHostCode.clear();
+    return scancodes;
+  }
+}
+
 export function isKeyMap(value: unknown): value is Record<string, number> {
   return typeof value === "object" && value !== null && !Array.isArray(value) &&
     Object.values(value).every((scan) => Number.isInteger(scan) && scan >= 0 && scan <= 0x7f);

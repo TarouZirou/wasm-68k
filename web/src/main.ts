@@ -1,6 +1,12 @@
 import init, { WebX68k } from "./wasm/x68k_wasm.js";
 import { createDiagnosticHdf, createDiagnosticIpl, createDiagnosticXdf } from "./diagnostic.js";
-import { decodeKeyMap, defaultKeyMap, encodeKeyMap, isKeyMap } from "./keyboard.js";
+import {
+  decodeKeyMap,
+  defaultKeyMap,
+  encodeKeyMap,
+  isKeyMap,
+  PressedKeyState,
+} from "./keyboard.js";
 
 type LoadTarget = "ipl" | "cgrom" | "scsi" | `fdd${0 | 1 | 2 | 3}` | "hdd0" | "state";
 // wasm-pack生成物がエディタ上で一世代古くても、Rust側の安定公開APIを型として
@@ -11,7 +17,7 @@ type Emulator = WebX68k & {
 };
 
 let keyMap: Record<string, number> = { ...defaultKeyMap };
-const pressedKeys = new Map<string, number>();
+const pressedKeys = new PressedKeyState();
 const pressedMouseButtons = new Set<number>();
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -449,27 +455,23 @@ function restoreRange(id: string, value: unknown): void {
 
 function keyDown(event: KeyboardEvent): void {
   if (document.activeElement !== canvas) return;
-  const scancode = keyMap[event.code];
+  const scancode = pressedKeys.press(event.code, keyMap);
   if (scancode === undefined) return;
   event.preventDefault();
-  if (!pressedKeys.has(event.code)) pressedKeys.set(event.code, scancode);
   // 実機キーボードのtypematic相当としてブラウザのrepeat makeも配送する。
   emulator.set_key(scancode, true);
 }
 
 function keyUp(event: KeyboardEvent): void {
-  const scancode = pressedKeys.get(event.code);
-  if (scancode === undefined) return;
+  const released = pressedKeys.release(event.code);
+  if (released === undefined) return;
   event.preventDefault();
-  pressedKeys.delete(event.code);
-  if (![...pressedKeys.values()].includes(scancode)) emulator.set_key(scancode, false);
+  if (released.sendBreak) emulator.set_key(released.scancode, false);
 }
 
 function releaseAllKeys(): void {
-  if (emulator) {
-    for (const scancode of new Set(pressedKeys.values())) emulator.set_key(scancode, false);
-  }
-  pressedKeys.clear();
+  const scancodes = pressedKeys.drain();
+  if (emulator) for (const scancode of scancodes) emulator.set_key(scancode, false);
 }
 
 function releaseTransientInputs(): void {
