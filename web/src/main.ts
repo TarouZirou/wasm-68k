@@ -149,6 +149,7 @@ async function bootOfficialHuman68k(): Promise<void> {
   let started = false;
   button.disabled = true;
   assetLoadInProgress = true;
+  resetAudioBuffer();
   // 25MHzプロファイルのframe実行がfetch/hash検証のPromiseを飢餓させないよう、
   // 資産の検証中だけコアを停止する。
   emulator.set_paused(true);
@@ -190,6 +191,7 @@ async function bootOfficialHuman68k(): Promise<void> {
 async function createEmulator(): Promise<void> {
   // Wasm surface生成のawait中に、破棄済みインスタンスをanimateが呼ばないようにする。
   emulatorReady = false;
+  resetAudioBuffer();
   canvas.dataset.emulatorReady = "false";
   backend.textContent = "初期化中…";
   if (emulator) {
@@ -253,6 +255,7 @@ function extension(name: string): string {
 async function loadFile(file: File, target: LoadTarget): Promise<void> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (target === "state") {
+    resetAudioBuffer();
     emulator.load_state(bytes);
     message(`保存状態を復元しました: ${file.name}`);
     return;
@@ -328,6 +331,10 @@ async function startAudio(): Promise<void> {
   await audioContext.resume();
   emulator.set_audio_enabled(true);
   $<HTMLButtonElement>("audio").textContent = "音声有効";
+}
+
+function resetAudioBuffer(): void {
+  audioNode?.port.postMessage({ type: "reset" });
 }
 
 async function enableMidi(): Promise<void> {
@@ -518,9 +525,14 @@ function wireUi(): void {
     void saveSettings().catch(console.warn);
     void createEmulator().catch(showError);
   });
-  $<HTMLButtonElement>("reset").onclick = () => { emulator.reset(); message("リセットしました"); };
+  $<HTMLButtonElement>("reset").onclick = () => {
+    resetAudioBuffer();
+    emulator.reset();
+    message("リセットしました");
+  };
   $<HTMLButtonElement>("diagnostic-rom").onclick = () => {
     if (!emulatorReady) return;
+    resetAudioBuffer();
     if (mountedNames.has("fdd0")) ejectMounted("fdd0");
     if (mountedNames.has("hdd0")) ejectMounted("hdd0");
     emulator.mount_media("floppy", 0, "xdf", createDiagnosticXdf(), true);
@@ -541,6 +553,7 @@ function wireUi(): void {
   $<HTMLButtonElement>("official-software").onclick = () => void bootOfficialHuman68k().catch(showError);
   $<HTMLButtonElement>("pause").onclick = (event) => {
     emulator.set_paused(!emulator.is_paused());
+    if (emulator.is_paused()) resetAudioBuffer();
     (event.currentTarget as HTMLButtonElement).textContent = emulator.is_paused() ? "再開" : "一時停止";
   };
   $<HTMLButtonElement>("fullscreen").onclick = () => void canvas.requestFullscreen();
@@ -636,7 +649,7 @@ function wireUi(): void {
   };
   const stateSlot = () => $<HTMLSelectElement>("state-slot").value;
   $<HTMLButtonElement>("save-state").onclick = () => void browserStore.put(`state:${model.value}:${stateSlot()}`, emulator.save_state()).then(() => message(`保存状態スロット${stateSlot()}へ保存しました`)).catch(showError);
-  $<HTMLButtonElement>("load-state").onclick = () => void browserStore.get(`state:${model.value}:${stateSlot()}`).then((state) => { if (!state) throw new Error("保存状態がありません"); emulator.load_state(state); message(`保存状態スロット${stateSlot()}を復元しました`); }).catch(showError);
+  $<HTMLButtonElement>("load-state").onclick = () => void browserStore.get(`state:${model.value}:${stateSlot()}`).then((state) => { if (!state) throw new Error("保存状態がありません"); resetAudioBuffer(); emulator.load_state(state); message(`保存状態スロット${stateSlot()}を復元しました`); }).catch(showError);
   $<HTMLButtonElement>("export-state").onclick = () => download(`wasm-68k-${model.value}.x68state`, emulator.save_state());
   $<HTMLButtonElement>("import-state").onclick = () => { loadTarget = "state"; picker.accept = ".x68state"; picker.click(); };
   $<HTMLButtonElement>("diagnostics").onclick = () => download("wasm-68k-diagnostics.json", emulator.diagnostics(), "application/json");
@@ -660,6 +673,7 @@ function animate(timestamp: number): void {
   canvas.dataset.machineFrame = String(emulator.frame_number());
   if (autoPauseAfterFirstFrame && emulator.frame_number() >= 1 && !emulator.is_paused()) {
     emulator.set_paused(true);
+    resetAudioBuffer();
     $<HTMLButtonElement>("pause").textContent = "再開";
   }
   pollGamepad();

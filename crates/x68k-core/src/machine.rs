@@ -149,6 +149,11 @@ impl Machine {
     }
 
     #[doc(hidden)]
+    pub fn sprite_diagnostics(&self) -> Vec<(u8, u16, u16, u16, u8)> {
+        self.bus.sprite_diagnostics()
+    }
+
+    #[doc(hidden)]
     pub fn set_cpu_trap_diagnostics(&mut self, enabled: bool) {
         self.trace_cpu_traps = enabled;
         self.last_cpu_trap = None;
@@ -801,7 +806,7 @@ mod tests {
         );
         assert_eq!(
             first_pcm_hash,
-            "3cc0fa246dd7256a7f8e728d52624993f4eac29c05e96f3b2d6384a6efcfe41f"
+            "8544044bfa21add8f5b70a70843fc42625ce3ee16860b475df461d4cd52c9e90"
         );
     }
 

@@ -30,13 +30,32 @@ impl SpriteBg {
         }
     }
 
+    pub(crate) fn diagnostics(&self) -> Vec<(u8, u16, u16, u16, u8)> {
+        (0..128)
+            .filter_map(|number| {
+                let base = number * 8;
+                let priority = self.bytes[base + 7] & 3;
+                (priority != 0).then(|| {
+                    (
+                        number as u8,
+                        u16::from_be_bytes([self.bytes[base], self.bytes[base + 1]]) & 0x03ff,
+                        u16::from_be_bytes([self.bytes[base + 2], self.bytes[base + 3]]) & 0x03ff,
+                        u16::from_be_bytes([self.bytes[base + 4], self.bytes[base + 5]]),
+                        priority,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn pixel(&self, video: &Video, x: u32, y: u32) -> Option<u16> {
         if self.bytes[0x808] & 2 == 0 {
             return None;
         }
         // 実機の内部順序: sprite pri1 < BG1 < sprite pri2 < BG0 < sprite pri3。
         let mut result = self.sprite_pixel(video, x, y, 1);
-        if self.bytes[0x809] & 8 != 0 && self.bytes[0x811] & 3 == 0 {
+        if self.bytes[0x809] & 8 != 0 {
             result = self.bg_pixel(video, x, y, 1).or(result);
         }
         result = self.sprite_pixel(video, x, y, 2).or(result);
@@ -46,19 +65,114 @@ impl SpriteBg {
         self.sprite_pixel(video, x, y, 3).or(result)
     }
 
+    /// Sprite/BG内部の優先順で1frameを合成する。bit 16を有効flag、下位16bitを
+    /// GRBiとして返し、paletteが黒の不透明pixelも透明色と区別する。
+    pub(crate) fn render(&self, video: &Video, width: u32, height: u32) -> Vec<u32> {
+        let mut frame = vec![0; (width * height) as usize];
+        if self.bytes[0x808] & 2 == 0 {
+            return frame;
+        }
+        self.draw_sprites(video, width, height, 1, &mut frame);
+        if self.bytes[0x809] & 8 != 0 {
+            self.draw_bg(video, width, height, 1, &mut frame);
+        }
+        self.draw_sprites(video, width, height, 2, &mut frame);
+        if self.bytes[0x809] & 1 != 0 {
+            self.draw_bg(video, width, height, 0, &mut frame);
+        }
+        self.draw_sprites(video, width, height, 3, &mut frame);
+        frame
+    }
+
+    fn draw_sprites(
+        &self,
+        video: &Video,
+        width: u32,
+        height: u32,
+        priority: u8,
+        frame: &mut [u32],
+    ) {
+        // 大きいsprite番号から描き、同一priorityでは小さい番号を前面にする。
+        for number in (0..128).rev() {
+            let base = number * 8;
+            if self.bytes[base + 7] & 3 != priority {
+                continue;
+            }
+            let px =
+                (u16::from_be_bytes([self.bytes[base], self.bytes[base + 1]]) & 0x03ff) as i32 - 16;
+            let py = (u16::from_be_bytes([self.bytes[base + 2], self.bytes[base + 3]]) & 0x03ff)
+                as i32
+                - 16;
+            let control = u16::from_be_bytes([self.bytes[base + 4], self.bytes[base + 5]]);
+            let pattern = usize::from(control & 0x00ff);
+            for local_y in 0..16 {
+                let screen_y = py + local_y;
+                if !(0..height as i32).contains(&screen_y) {
+                    continue;
+                }
+                let sy = if control & 0x8000 != 0 {
+                    15 - local_y
+                } else {
+                    local_y
+                } as usize;
+                for local_x in 0..16 {
+                    let screen_x = px + local_x;
+                    if !(0..width as i32).contains(&screen_x) {
+                        continue;
+                    }
+                    let sx = if control & 0x4000 != 0 {
+                        15 - local_x
+                    } else {
+                        local_x
+                    } as usize;
+                    let address = 0x8000 + pattern_address(pattern, 16, sx, sy);
+                    let packed = self.bytes.get(address).copied().unwrap_or(0);
+                    let nibble = if sx & 1 == 0 {
+                        packed >> 4
+                    } else {
+                        packed & 0x0f
+                    };
+                    if nibble != 0 {
+                        let palette = ((control >> 4) as u8 & 0xf0) | nibble;
+                        frame[screen_y as usize * width as usize + screen_x as usize] =
+                            0x1_0000 | u32::from(video.text_colour(palette));
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_bg(&self, video: &Video, width: u32, height: u32, plane: usize, frame: &mut [u32]) {
+        for y in 0..height {
+            for x in 0..width {
+                if let Some(colour) = self.bg_pixel(video, x, y, plane) {
+                    frame[(y * width + x) as usize] = 0x1_0000 | u32::from(colour);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn sprite_pixel(&self, video: &Video, x: u32, y: u32, priority: u8) -> Option<u16> {
         let mut result = None;
         for number in (0..128).rev() {
             let base = number * 8;
-            let px = u16::from_be_bytes([self.bytes[base], self.bytes[base + 1]]) as i32 - 16;
-            let py = u16::from_be_bytes([self.bytes[base + 2], self.bytes[base + 3]]) as i32 - 16;
+            // 座標レジスタは10bit。上位の未使用bitは描画座標へ混ぜない。
+            let px =
+                (u16::from_be_bytes([self.bytes[base], self.bytes[base + 1]]) & 0x03ff) as i32 - 16;
+            let py = (u16::from_be_bytes([self.bytes[base + 2], self.bytes[base + 3]]) & 0x03ff)
+                as i32
+                - 16;
             let local_x = x as i32 - px;
             let local_y = y as i32 - py;
             if !(0..16).contains(&local_x) || !(0..16).contains(&local_y) {
                 continue;
             }
             let control = u16::from_be_bytes([self.bytes[base + 4], self.bytes[base + 5]]);
-            if self.bytes[base + 6] & 3 != priority {
+            // +6は16bit優先度レジスタで、priorityはbit 1-0、つまり
+            // big-endianバス上の下位byte（+7）にある。上位byteを読むと
+            // 実ソフトのmove.w #priority,$eb0006を常にpriority 0としてしまう。
+            if self.bytes[base + 7] & 3 != priority {
                 continue;
             }
             let sx = if control & 0x4000 != 0 {
@@ -103,12 +217,12 @@ impl SpriteBg {
         let sx = (x + scroll_x) & mask;
         let sy = (y + scroll_y) & mask;
         let plane_config = self.bytes[0x809];
-        let alternate_map = if plane == 0 {
-            plane_config & 0x06 != 0
+        let bg0_map_selected = if plane == 0 {
+            plane_config & 0x06 == 0x02
         } else {
-            plane_config & 0x30 != 0
+            plane_config & 0x30 == 0x10
         };
-        let map_base = if alternate_map { 0xe000 } else { 0xc000 };
+        let map_base = if bg0_map_selected { 0xe000 } else { 0xc000 };
         let tiles_per_row = 64;
         let entry =
             map_base + ((sy as usize / tile_size) * tiles_per_row + sx as usize / tile_size) * 2;
@@ -161,7 +275,7 @@ mod tests {
         sprites.write(1, 16);
         sprites.write(2, 0);
         sprites.write(3, 16);
-        sprites.write(6, 1);
+        sprites.write(7, 1);
         sprites.write(0x8000, 0x10);
         sprites.write(0x808, 2);
         assert_eq!(sprites.pixel(&video, 0, 0), Some(0x07c0));
@@ -193,12 +307,95 @@ mod tests {
         ram.write(3, 16);
         ram.write(4, 0);
         ram.write(5, 3);
-        ram.write(6, 3);
+        ram.write(7, 3);
         ram.write(0x8180, 0x30);
         assert_eq!(
             ram.pixel(&video, 0, 0),
             Some(0x3333),
             "priority 3 sprite is top"
         );
+    }
+
+    #[test]
+    fn sprite_priority_uses_low_byte_of_the_word_register() {
+        let mut video = Video::default();
+        video.write(0x202, 0x07);
+        video.write(0x203, 0xc0);
+        let mut sprites = SpriteBg::default();
+        sprites.write(1, 16);
+        sprites.write(3, 16);
+        sprites.write(0x8000, 0x10);
+        sprites.write(0x808, 2);
+
+        sprites.write(6, 3);
+        assert_eq!(sprites.pixel(&video, 0, 0), None);
+        sprites.write(6, 0);
+        sprites.write(7, 3);
+        assert_eq!(sprites.pixel(&video, 0, 0), Some(0x07c0));
+    }
+
+    #[test]
+    fn sprite_coordinates_are_ten_bit_registers() {
+        let mut video = Video::default();
+        video.write(0x202, 0x07);
+        video.write(0x203, 0xc0);
+        let mut sprites = SpriteBg::default();
+        sprites.write(0, 0xfc);
+        sprites.write(1, 16);
+        sprites.write(2, 0xfc);
+        sprites.write(3, 16);
+        sprites.write(7, 3);
+        sprites.write(0x8000, 0x10);
+        sprites.write(0x808, 2);
+        assert_eq!(sprites.pixel(&video, 0, 0), Some(0x07c0));
+    }
+
+    #[test]
+    fn frame_renderer_matches_pixel_renderer_and_keeps_opaque_black() {
+        let mut video = Video::default();
+        video.write(0x202, 0x07);
+        video.write(0x203, 0xc0);
+        let mut sprites = SpriteBg::default();
+        sprites.write(1, 16);
+        sprites.write(3, 16);
+        sprites.write(7, 3);
+        sprites.write(0x8000, 0x12);
+        sprites.write(0x808, 2);
+        let frame = sprites.render(&video, 2, 1);
+        for x in 0..2 {
+            assert_eq!(
+                (frame[x] & 0x1_0000 != 0).then_some(frame[x] as u16),
+                sprites.pixel(&video, x as u32, 0)
+            );
+        }
+
+        video.write(0x202, 0);
+        video.write(0x203, 0);
+        let frame = sprites.render(&video, 1, 1);
+        assert_eq!(frame[0], 0x1_0000, "palette black remains opaque");
+    }
+
+    #[test]
+    fn bg1_remains_visible_in_16_pixel_mode_and_txsel_is_exact() {
+        let mut video = Video::default();
+        video.write(0x202, 0x11);
+        video.write(0x203, 0x11);
+        video.write(0x204, 0x22);
+        video.write(0x205, 0x22);
+        let mut sprites = SpriteBg::default();
+        sprites.write(0x808, 2);
+        sprites.write(0x809, 0x08); // BG1 enable, BG1 map selected
+        sprites.write(0x811, 1); // 16x16 mode
+        sprites.write(0xc001, 1);
+        sprites.write(0x8080, 0x10);
+        assert_eq!(sprites.render(&video, 1, 1)[0], 0x1_1111);
+
+        sprites.write(0x809, 0x18); // BG1 TXSEL=01: BG0 map selected
+        sprites.write(0xe001, 2);
+        sprites.write(0x8100, 0x20);
+        assert_eq!(sprites.render(&video, 1, 1)[0], 0x1_2222);
+
+        sprites.write(0x809, 0x28); // TXSEL=10 is not the BG0 map
+        assert_eq!(sprites.render(&video, 1, 1)[0], 0x1_1111);
     }
 }

@@ -89,6 +89,16 @@ fn main() {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1);
+    let trace_at = std::env::var("X68K_TRACE_AT")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|frame| frame.parse::<u32>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let trace_all_sprites = std::env::var_os("X68K_TRACE_SPRITES").is_some();
     let key_at = std::env::var("X68K_KEY_AT")
         .ok()
         .and_then(|value| value.parse::<u32>().ok());
@@ -115,6 +125,24 @@ fn main() {
     if let Some(frame) = key_at {
         key_events.push((frame, key_scancode));
     }
+    let key_holds = std::env::var("X68K_KEY_HOLDS")
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .filter_map(|event| {
+                    let (range, scan) = event.split_once(':')?;
+                    let (start, end) = range.split_once('-')?;
+                    Some((
+                        start.parse::<u32>().ok()?,
+                        end.parse::<u32>().ok()?,
+                        u8::from_str_radix(scan.trim_start_matches("0x"), 16).ok()?,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
     let mut audio_peak = 0.0f32;
     let mut audio_samples = 0usize;
     for frame in 1..=frames {
@@ -133,6 +161,20 @@ fn main() {
                 pressed: false,
             });
         }
+        for &(start, end, scancode) in &key_holds {
+            if frame == start {
+                machine.input(InputEvent::Key {
+                    scancode,
+                    pressed: true,
+                });
+            }
+            if frame == end {
+                machine.input(InputEvent::Key {
+                    scancode,
+                    pressed: false,
+                });
+            }
+        }
         let result = machine.run_frame();
         let samples = machine.drain_audio();
         audio_samples += samples.len();
@@ -142,6 +184,7 @@ fn main() {
         if trace_every_frame && frame >= trace_from
             || (result.width, result.height) != previous
             || matches!(frame, 1 | 2 | 5 | 10 | 30 | 60 | 120 | 180)
+            || trace_at.contains(&frame)
             || frame == frames
         {
             let (pc, sr, stopped, sp, exception) = machine.cpu_diagnostics();
@@ -166,9 +209,32 @@ fn main() {
                 .iter()
                 .filter(|&&pixel| pixel != 0)
                 .count();
+            let sprites = machine.sprite_diagnostics();
+            let sprite_hash = sprites
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325u64, |hash, sprite| {
+                    [
+                        u64::from(sprite.0),
+                        u64::from(sprite.1),
+                        u64::from(sprite.2),
+                        u64::from(sprite.3),
+                        u64::from(sprite.4),
+                    ]
+                    .into_iter()
+                    .fold(hash, |hash, value| {
+                        (hash ^ value).wrapping_mul(0x100_0000_01b3)
+                    })
+                });
+            let sprite_head = sprites
+                .iter()
+                .take(if trace_all_sprites { 128 } else { 8 })
+                .copied()
+                .collect::<Vec<_>>();
             println!(
-                "frame={frame} size={}x{} pc={pc:08x} sr={sr:04x} sp={sp:08x} stopped={stopped} exception={exception:?} first_fault={first_fault:?} last_fault={last_fault:?} faults={faults} fdc_commands={fdc_commands} fdc_sector_reads={fdc_sector_reads} fdc_command={fdc_command:02x} fdc_params={fdc_parameters:02x?} fdc_status={fdc_status:02x} fdc_output={fdc_output} fdc_st={fdc_st0:02x}/{fdc_st1:02x}/{fdc_st2:02x} dma={dma_csr:02x}/{dma_cer:02x}/{dma_ocr:02x}/{dma_ccr:02x}/mtc={dma_mtc:04x}/mar={dma_mar:08x}/dar={dma_dar:08x} ioc={ioc_signal:02x}/{ioc_request:02x}/{ioc_enable:02x}/{ioc_vector:02x}->{ioc_handler:08x}/acks={ioc_acks}/spurious={ioc_spurious} non_black={non_black}",
-                result.width, result.height,
+                "frame={frame} size={}x{} pc={pc:08x} sr={sr:04x} sp={sp:08x} stopped={stopped} exception={exception:?} first_fault={first_fault:?} last_fault={last_fault:?} faults={faults} fdc_commands={fdc_commands} fdc_sector_reads={fdc_sector_reads} fdc_command={fdc_command:02x} fdc_params={fdc_parameters:02x?} fdc_status={fdc_status:02x} fdc_output={fdc_output} fdc_st={fdc_st0:02x}/{fdc_st1:02x}/{fdc_st2:02x} dma={dma_csr:02x}/{dma_cer:02x}/{dma_ocr:02x}/{dma_ccr:02x}/mtc={dma_mtc:04x}/mar={dma_mar:08x}/dar={dma_dar:08x} ioc={ioc_signal:02x}/{ioc_request:02x}/{ioc_enable:02x}/{ioc_vector:02x}->{ioc_handler:08x}/acks={ioc_acks}/spurious={ioc_spurious} non_black={non_black} sprites={}/{sprite_hash:016x}/{sprite_head:?}",
+                result.width,
+                result.height,
+                sprites.len(),
             );
             previous = (result.width, result.height);
         }

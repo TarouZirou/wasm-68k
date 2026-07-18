@@ -58,7 +58,7 @@ export function createDiagnosticIpl(model: DiagnosticModel): Uint8Array {
   moveWordImmediate(16, 0x00eb_0000);
   moveWordImmediate(16, 0x00eb_0002);
   moveWordImmediate(0, 0x00eb_0004);
-  moveByteImmediate(3, 0x00eb_0006);
+  moveWordImmediate(3, 0x00eb_0006);
   moveByteImmediate(0x10, 0x00eb_8000);
   moveByteImmediate(2, 0x00eb_0808);
 

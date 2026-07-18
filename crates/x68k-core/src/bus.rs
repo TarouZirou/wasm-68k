@@ -402,6 +402,11 @@ impl Bus {
 
         let (text_scroll_x, text_scroll_y) = self.devices.crtc.text_scroll();
         let scrolls = self.devices.crtc.graphic_scrolls();
+        let sprite_frame = self
+            .devices
+            .video
+            .sprites_enabled()
+            .then(|| self.sprite_ram.render(&self.devices.video, width, height));
         for y in 0..height {
             for x in 0..width {
                 let pixel = (y * width + x) as usize;
@@ -428,12 +433,10 @@ impl Bus {
                 }
                 let text = (text_color != 0 && self.devices.video.text_enabled())
                     .then(|| self.devices.video.text_colour(text_color));
-                let sprite = self
-                    .devices
-                    .video
-                    .sprites_enabled()
-                    .then(|| self.sprite_ram.pixel(&self.devices.video, x, y))
-                    .flatten();
+                let sprite = sprite_frame.as_ref().and_then(|sprite_frame| {
+                    let value = sprite_frame[pixel];
+                    (value & 0x1_0000 != 0).then_some(value as u16)
+                });
                 // priority値は0が最前面、2/3が最背面。同値時は
                 // graphics < sprite/BG < text の順で前面になる。
                 //
@@ -551,6 +554,10 @@ impl Bus {
         let start = address as usize;
         let end = start.saturating_add(length.min(4096)).min(self.ram.len());
         self.ram.get(start..end).unwrap_or_default().to_vec()
+    }
+
+    pub fn sprite_diagnostics(&self) -> Vec<(u8, u16, u16, u16, u8)> {
+        self.sprite_ram.diagnostics()
     }
 
     pub fn ioc_diagnostics(&self) -> (u8, u8, u8, u8, u32, u64, u64) {
