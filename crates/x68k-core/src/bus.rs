@@ -24,7 +24,9 @@ use crate::devices::system_port::SystemPort;
 use crate::devices::video::Video;
 use crate::media::MediaImage;
 use crate::scheduler::{Event, Scheduler};
-use crate::{DriveId, InputEvent, MachineConfig, MachineModel};
+use crate::{
+    DriveId, InputEvent, MAX_SCREEN_HEIGHT, MAX_SCREEN_WIDTH, MachineConfig, MachineModel,
+};
 
 const GVRAM_BASE: u32 = 0xc0_0000;
 const TVRAM_BASE: u32 = 0xe0_0000;
@@ -54,6 +56,10 @@ const CGROM_SIZE: u32 = 0x0c_0000;
 
 const TVRAM_SIZE: usize = 0x08_0000;
 const SRAM_SIZE: usize = 0x4000;
+
+fn blank_scanout() -> Vec<u16> {
+    vec![0; (MAX_SCREEN_WIDTH * MAX_SCREEN_HEIGHT) as usize]
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Devices {
@@ -141,6 +147,20 @@ pub(crate) struct Bus {
     pub sram_write_enabled: bool,
     pub devices: Devices,
     scheduler: Scheduler,
+    /// CRTCが実際に通過した走査線だけを保持する。XSPのsprite doublerは
+    /// raster IRQ中に同じsprite番号を再配置するため、frame末尾のRAM状態から
+    /// 全画面を再構築することはできない。
+    #[serde(skip, default = "blank_scanout")]
+    scanout_frame: Vec<u16>,
+    #[serde(skip, default)]
+    scanout_width: u32,
+    #[serde(skip, default)]
+    scanout_height: u32,
+    #[serde(skip, default)]
+    frame_boundary_pending: bool,
+    /// deserialize直後など、可視領域の途中から始まった不完全なframeを公開しない。
+    #[serde(skip, default)]
+    scanout_started: bool,
     accumulated_wait: u32,
     first_fault_address: Option<u32>,
     last_fault_address: Option<u32>,
@@ -171,6 +191,11 @@ impl Bus {
             sram_write_enabled: false,
             devices: Devices::new(config.model),
             scheduler: Scheduler::new(config.model.clock_hz()),
+            scanout_frame: blank_scanout(),
+            scanout_width: 768,
+            scanout_height: 512,
+            frame_boundary_pending: false,
+            scanout_started: false,
             accumulated_wait: 0,
             first_fault_address: None,
             last_fault_address: None,
@@ -186,6 +211,11 @@ impl Bus {
         self.sram_write_enabled = false;
         self.devices = Devices::new(self.model);
         self.scheduler.reset();
+        self.scanout_frame.fill(0);
+        self.scanout_width = 768;
+        self.scanout_height = 512;
+        self.frame_boundary_pending = false;
+        self.scanout_started = false;
         self.accumulated_wait = 0;
         self.first_fault_address = None;
         self.last_fault_address = None;
@@ -302,16 +332,61 @@ impl Bus {
         self.devices.midi.tick(cycles, self.clock_hz);
         for event in self.scheduler.advance(cycles) {
             match event {
-                Event::HorizontalSync => {}
+                // CPUは走査線開始時のraster IRQでsprite tableを書き換える。
+                // 有効表示が終わるHSYNC直前に画素を確定すれば、EB0808 bit 9が
+                // CPUアクセス側へ落ちている途中の状態を誤って表示しない。
+                Event::HorizontalSync => {
+                    for line in self
+                        .devices
+                        .crtc
+                        .visible_output_lines()
+                        .into_iter()
+                        .flatten()
+                    {
+                        if self.scanout_started && line < self.scanout_height {
+                            self.render_scanout_line(line);
+                        }
+                    }
+                }
                 Event::Scanline => {
-                    for signal in self.devices.crtc.next_scanline() {
-                        if signal == Signal::VerticalSync {
-                            self.devices.mfp.timer_a_event();
+                    let signals = self.devices.crtc.next_scanline();
+                    if self.devices.crtc.at_visible_start() {
+                        let (width, height) = self.screen_dimensions();
+                        self.scanout_width = width.clamp(1, MAX_SCREEN_WIDTH);
+                        self.scanout_height = height.clamp(1, MAX_SCREEN_HEIGHT);
+                        self.scanout_frame[..(self.scanout_width * self.scanout_height) as usize]
+                            .fill(0);
+                        self.scanout_started = true;
+                    }
+                    for signal in signals {
+                        if signal == Signal::FrameBoundary {
+                            if self.scanout_started {
+                                self.frame_boundary_pending = true;
+                                self.scanout_started = false;
+                            }
+                            continue;
+                        }
+                        let vertical_edge = match signal {
+                            Signal::VerticalDisplayStart => Some(true),
+                            Signal::VerticalDisplayEnd => Some(false),
+                            _ => None,
+                        };
+                        if let Some(rising) = vertical_edge {
+                            // GPIP4はV-DISPのedge入力。AERと逆側のedgeまで
+                            // source 9へ送ると、VBlank更新が可視領域でも再実行される。
+                            if self.devices.mfp.gpip_rising_edge(0x10) == rising {
+                                self.devices.mfp.timer_a_event();
+                                self.devices.mfp.raise(9);
+                            }
+                            continue;
                         }
                         self.devices.mfp.raise(match signal {
                             Signal::HorizontalSync => 0,
                             Signal::Raster => 1,
-                            Signal::VerticalSync => 9,
+                            Signal::VerticalDisplayStart | Signal::VerticalDisplayEnd => {
+                                unreachable!()
+                            }
+                            Signal::FrameBoundary => unreachable!(),
                         });
                     }
                 }
@@ -399,92 +474,111 @@ impl Bus {
             frame.fill(0);
             return;
         }
+        for y in 0..height {
+            let start = (y * width) as usize;
+            self.render_line(&mut frame[start..start + width as usize], width, y);
+        }
+    }
 
+    /// CRTCが確定した最新のscanoutをMachine側へ渡す。hostの固定60Hzとは
+    /// 独立しており、映像frameが未完成なら前回のframebufferを保持する。
+    pub fn take_scanout(&mut self, frame: &mut [u16]) -> Option<(u32, u32)> {
+        if !std::mem::take(&mut self.frame_boundary_pending) {
+            return None;
+        }
+        let length = (self.scanout_width * self.scanout_height) as usize;
+        frame[..length].copy_from_slice(&self.scanout_frame[..length]);
+        Some((self.scanout_width, self.scanout_height))
+    }
+
+    fn render_scanout_line(&mut self, y: u32) {
+        let width = self.scanout_width;
+        let mut line = [0u16; MAX_SCREEN_WIDTH as usize];
+        self.render_line(&mut line[..width as usize], width, y);
+        let start = (y * width) as usize;
+        self.scanout_frame[start..start + width as usize].copy_from_slice(&line[..width as usize]);
+    }
+
+    fn render_line(&self, line: &mut [u16], width: u32, y: u32) {
         let (text_scroll_x, text_scroll_y) = self.devices.crtc.text_scroll();
         let scrolls = self.devices.crtc.graphic_scrolls();
-        let sprite_frame = self
-            .devices
-            .video
-            .sprites_enabled()
-            .then(|| self.sprite_ram.render(&self.devices.video, width, height));
-        for y in 0..height {
-            for x in 0..width {
-                let pixel = (y * width + x) as usize;
-                let graphic = self
-                    .devices
-                    .video
-                    .graphics_enabled()
-                    .then(|| {
-                        self.devices
-                            .video
-                            .graphic_pixel_with_attributes(&self.gvram, scrolls, x, y)
-                    })
-                    .flatten();
-                let text_x = (x + u32::from(text_scroll_x)) & 1023;
-                let text_y = (y + u32::from(text_scroll_y)) & 1023;
-                let byte_in_line = (text_y as usize * 128) + text_x as usize / 8;
-                let bit = 7 - (text_x as usize & 7);
-                let mut text_color = 0u8;
-                for plane in 0..4 {
-                    let index = plane * 0x20_000 + byte_in_line;
-                    if index < self.tvram.len() {
-                        text_color |= ((self.tvram[index] >> bit) & 1) << plane;
-                    }
+        let mut sprite_line = [0u32; MAX_SCREEN_WIDTH as usize];
+        if self.devices.video.sprites_enabled() {
+            self.sprite_ram.render_scanline(
+                &self.devices.video,
+                width,
+                y,
+                &mut sprite_line[..width as usize],
+            );
+        }
+        for x in 0..width {
+            let pixel = x as usize;
+            let graphic = self
+                .devices
+                .video
+                .graphics_enabled()
+                .then(|| {
+                    self.devices
+                        .video
+                        .graphic_pixel_with_attributes(&self.gvram, scrolls, x, y)
+                })
+                .flatten();
+            let text_x = (x + u32::from(text_scroll_x)) & 1023;
+            let text_y = (y + u32::from(text_scroll_y)) & 1023;
+            let byte_in_line = (text_y as usize * 128) + text_x as usize / 8;
+            let bit = 7 - (text_x as usize & 7);
+            let mut text_color = 0u8;
+            for plane in 0..4 {
+                let index = plane * 0x20_000 + byte_in_line;
+                if index < self.tvram.len() {
+                    text_color |= ((self.tvram[index] >> bit) & 1) << plane;
                 }
-                let text = (text_color != 0 && self.devices.video.text_enabled())
-                    .then(|| self.devices.video.text_colour(text_color));
-                let sprite = sprite_frame.as_ref().and_then(|sprite_frame| {
-                    let value = sprite_frame[pixel];
-                    (value & 0x1_0000 != 0).then_some(value as u16)
-                });
-                // priority値は0が最前面、2/3が最背面。同値時は
-                // graphics < sprite/BG < text の順で前面になる。
-                //
-                // ここは表示領域の全画素（通常 768x512）で実行されるホット
-                // パスなので、Vec を画素ごとに確保しない。固定長のスタック
-                // 配列に積んで必要な範囲だけを並べ替える。以前の
-                // `Vec::with_capacity(3)` はフレームごとに約40万回の小さな
-                // allocationを発生させ、Wasmのフレーム進行を大きく遅らせていた。
-                let mut layers = [(0u8, 0u8, 0u16, false, false); 3];
-                let mut layer_count = 0usize;
-                if let Some((value, special)) = graphic {
-                    let priority = if special && self.devices.video.special_priority_enabled() {
-                        0
-                    } else {
-                        self.devices.video.layer_priority(0)
-                    };
-                    let tie = if special && self.devices.video.special_priority_enabled() {
-                        3
-                    } else {
-                        0
-                    };
-                    layers[layer_count] = (priority, tie, value, true, special);
-                    layer_count += 1;
-                }
-                if let Some(value) = sprite {
-                    layers[layer_count] =
-                        (self.devices.video.layer_priority(2), 1, value, false, false);
-                    layer_count += 1;
-                }
-                if let Some(value) = text {
-                    layers[layer_count] =
-                        (self.devices.video.layer_priority(1), 2, value, false, false);
-                    layer_count += 1;
-                }
-                layers[..layer_count]
-                    .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-                frame[pixel] = if self.devices.video.half_transparency_enabled()
-                    && layer_count >= 2
-                    && layers[layer_count - 1].3
-                    && layers[layer_count - 1].4
-                {
-                    color::blend_half(layers[layer_count - 1].2, layers[layer_count - 2].2)
-                } else {
-                    layer_count
-                        .checked_sub(1)
-                        .map_or(0, |index| layers[index].2)
-                };
             }
+            let text = (text_color != 0 && self.devices.video.text_enabled())
+                .then(|| self.devices.video.text_colour(text_color));
+            let sprite = (sprite_line[pixel] & 0x1_0000 != 0).then_some(sprite_line[pixel] as u16);
+            // priority値は0が最前面、2/3が最背面。同値時は
+            // graphics < sprite/BG < text の順で前面になる。
+            // 固定長配列を使い、走査線のhot pathでallocationしない。
+            let mut layers = [(0u8, 0u8, 0u16, false, false); 3];
+            let mut layer_count = 0usize;
+            if let Some((value, special)) = graphic {
+                let priority = if special && self.devices.video.special_priority_enabled() {
+                    0
+                } else {
+                    self.devices.video.layer_priority(0)
+                };
+                let tie = if special && self.devices.video.special_priority_enabled() {
+                    3
+                } else {
+                    0
+                };
+                layers[layer_count] = (priority, tie, value, true, special);
+                layer_count += 1;
+            }
+            if let Some(value) = sprite {
+                layers[layer_count] =
+                    (self.devices.video.layer_priority(2), 1, value, false, false);
+                layer_count += 1;
+            }
+            if let Some(value) = text {
+                layers[layer_count] =
+                    (self.devices.video.layer_priority(1), 2, value, false, false);
+                layer_count += 1;
+            }
+            layers[..layer_count]
+                .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+            line[pixel] = if self.devices.video.half_transparency_enabled()
+                && layer_count >= 2
+                && layers[layer_count - 1].3
+                && layers[layer_count - 1].4
+            {
+                color::blend_half(layers[layer_count - 1].2, layers[layer_count - 2].2)
+            } else {
+                layer_count
+                    .checked_sub(1)
+                    .map_or(0, |index| layers[index].2)
+            };
         }
     }
 
@@ -1319,6 +1413,69 @@ mod tests {
             0,
             "HSync must return high at the scanline boundary"
         );
+    }
+
+    #[test]
+    fn vertical_display_interrupt_respects_the_mfp_active_edge() {
+        let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
+        bus.devices.mfp.write(0x07, 0); // IERA: HSync/raster/timerを無効化
+        bus.devices.mfp.write(0x09, 0x40); // IERB: GPIP4 (source 9)
+        bus.devices.mfp.write(0x15, 0x40); // IMRB
+
+        // reset時のAER bit 4は0なので、可視領域開始のrising edgeではなく
+        // 終了時のfalling edgeだけが割り込みになる。
+        while !bus.devices.crtc.at_visible_start() {
+            bus.tick(bus.scheduler.cycles_until_next_event());
+        }
+        assert!(!bus.devices.mfp.has_interrupt());
+        for _ in 0..u32::from(bus.devices.crtc.v_total()) * 2 {
+            if bus.devices.mfp.has_interrupt() {
+                break;
+            }
+            bus.tick(bus.scheduler.cycles_until_next_event());
+        }
+        assert!(bus.devices.mfp.has_interrupt());
+
+        // pendingを消してrising edgeへ切り替えると、次の可視領域開始で発生する。
+        bus.devices.mfp.write(0x0d, 0); // IPRB clear
+        bus.devices.mfp.write(0x03, 0x16); // AER GPIP4 rising
+        while !bus.devices.crtc.at_visible_start() {
+            bus.tick(bus.scheduler.cycles_until_next_event());
+        }
+        assert!(bus.devices.mfp.has_interrupt());
+    }
+
+    #[test]
+    fn scanout_latches_each_line_before_raster_sprite_updates() {
+        let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
+        bus.devices.video.write(0x601, 0x40); // sprite/BG layer enable
+        bus.devices.video.write(0x202, 0x11);
+        bus.devices.video.write(0x203, 0x11);
+        bus.sprite_ram.write(1, 16);
+        bus.sprite_ram.write(3, 16);
+        bus.sprite_ram.write(7, 3);
+        bus.sprite_ram.write(0x8000, 0x10); // pattern 0, row 0
+        bus.sprite_ram.write(0x8004, 0x10); // pattern 0, row 1
+        bus.sprite_ram.write(0x808, 2);
+
+        while bus.devices.crtc.visible_output_lines()[0] != Some(0) {
+            let cycles = bus.scheduler.cycles_until_next_event();
+            bus.tick(cycles);
+        }
+        bus.tick(bus.scheduler.cycles_until_next_event()); // visible末尾のHSYNCで0行目を確定
+        assert_eq!(bus.scanout_frame[0], 0x1111);
+
+        // raster処理がpaletteを書き換えても、走査済みの0行目は変化せず、
+        // 次に開始する1行目からだけ新しい色が反映される。
+        bus.devices.video.write(0x202, 0x22);
+        bus.devices.video.write(0x203, 0x22);
+        while bus.devices.crtc.visible_output_lines()[0] != Some(1) {
+            let cycles = bus.scheduler.cycles_until_next_event();
+            bus.tick(cycles);
+        }
+        bus.tick(bus.scheduler.cycles_until_next_event()); // 1行目を確定
+        assert_eq!(bus.scanout_frame[0], 0x1111);
+        assert_eq!(bus.scanout_frame[bus.scanout_width as usize], 0x2222);
     }
 
     #[test]

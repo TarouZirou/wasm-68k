@@ -326,6 +326,10 @@ impl Machine {
         self.cpu_cycle_debt = 0;
         self.frame_count = 0;
         self.last_cpu_trap = None;
+        let (width, height) = self.bus.screen_dimensions();
+        self.width = width.clamp(1, MAX_SCREEN_WIDTH);
+        self.height = height.clamp(1, MAX_SCREEN_HEIGHT);
+        self.framebuffer.fill(0);
     }
 
     pub fn set_paused(&mut self, paused: bool) {
@@ -418,6 +422,13 @@ impl Machine {
                     let wait = self.bus.take_wait_cycles();
                     let elapsed = executed.saturating_add(wait).max(1);
                     self.bus.tick(elapsed);
+                    // CRTCが可視領域を走査し終えた瞬間のframeだけを公開する。
+                    // この後のVBlank/raster IRQでsprite tableが書換え途中になっても、
+                    // hostが次に表示するscanoutへ混入させない。
+                    if let Some((width, height)) = self.bus.take_scanout(&mut self.framebuffer) {
+                        self.width = width.clamp(1, MAX_SCREEN_WIDTH);
+                        self.height = height.clamp(1, MAX_SCREEN_HEIGHT);
+                    }
                     if elapsed > remaining {
                         self.cpu_cycle_debt = self
                             .cpu_cycle_debt
@@ -429,15 +440,12 @@ impl Machine {
                 }
             }
             self.frame_count = self.frame_count.wrapping_add(1);
-            let (width, height) = self.bus.screen_dimensions();
-            self.width = width.clamp(1, MAX_SCREEN_WIDTH);
-            self.height = height.clamp(1, MAX_SCREEN_HEIGHT);
-            self.bus.render_frame(
-                &mut self.framebuffer[..(self.width * self.height) as usize],
-                self.width,
-                self.height,
-                self.frame_count,
-            );
+            if self.bus.ipl.is_empty() {
+                let (width, height) = self.bus.screen_dimensions();
+                self.width = width.clamp(1, MAX_SCREEN_WIDTH);
+                self.height = height.clamp(1, MAX_SCREEN_HEIGHT);
+                self.framebuffer[..(self.width * self.height) as usize].fill(0);
+            }
             let numerator = self.audio_remainder + self.config.sample_rate;
             let audio_frames = (numerator / 60) as usize;
             self.audio_remainder = numerator % 60;

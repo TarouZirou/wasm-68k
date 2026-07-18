@@ -67,33 +67,75 @@ impl SpriteBg {
 
     /// Sprite/BG内部の優先順で1frameを合成する。bit 16を有効flag、下位16bitを
     /// GRBiとして返し、paletteが黒の不透明pixelも透明色と区別する。
+    #[cfg(test)]
     pub(crate) fn render(&self, video: &Video, width: u32, height: u32) -> Vec<u32> {
         let mut frame = vec![0; (width * height) as usize];
-        if self.bytes[0x808] & 2 == 0 {
-            return frame;
+        for y in 0..height {
+            self.render_scanline(
+                video,
+                width,
+                y,
+                &mut frame[(y * width) as usize..][..width as usize],
+            );
         }
-        self.draw_sprites(video, width, height, 1, &mut frame);
-        if self.bytes[0x809] & 8 != 0 {
-            self.draw_bg(video, width, height, 1, &mut frame);
-        }
-        self.draw_sprites(video, width, height, 2, &mut frame);
-        if self.bytes[0x809] & 1 != 0 {
-            self.draw_bg(video, width, height, 0, &mut frame);
-        }
-        self.draw_sprites(video, width, height, 3, &mut frame);
         frame
     }
 
-    fn draw_sprites(
+    /// 現在のsprite RAMを用いて1走査線だけを合成する。XSP等がraster IRQで
+    /// sprite番号を再利用するため、実フレームの最終状態から全行を描いてはならない。
+    pub(crate) fn render_scanline(&self, video: &Video, width: u32, y: u32, line: &mut [u32]) {
+        line.fill(0);
+        if self.bytes[0x808] & 2 == 0 {
+            return;
+        }
+        let (selected, selected_count) = self.selected_sprites(y);
+        self.draw_sprites_scanline(video, width, y, 1, &selected[..selected_count], line);
+        if self.bytes[0x809] & 8 != 0 {
+            self.draw_bg_scanline(video, width, y, 1, line);
+        }
+        self.draw_sprites_scanline(video, width, y, 2, &selected[..selected_count], line);
+        if self.bytes[0x809] & 1 != 0 {
+            self.draw_bg_scanline(video, width, y, 0, line);
+        }
+        self.draw_sprites_scanline(video, width, y, 3, &selected[..selected_count], line);
+    }
+
+    /// Cynthiaが1走査線で選択できるのはsprite番号の小さい方から32枚。
+    /// priorityはBGとの前後関係であり、この選択順やsprite間の前後関係を変えない。
+    fn selected_sprites(&self, y: u32) -> ([u8; 32], usize) {
+        let mut selected = [0; 32];
+        let mut count = 0;
+        for number in 0..128 {
+            let base = number * 8;
+            if self.bytes[base + 7] & 3 == 0 {
+                continue;
+            }
+            let py = (u16::from_be_bytes([self.bytes[base + 2], self.bytes[base + 3]]) & 0x03ff)
+                as i32
+                - 16;
+            if (py..py + 16).contains(&(y as i32)) {
+                selected[count] = number as u8;
+                count += 1;
+                if count == selected.len() {
+                    break;
+                }
+            }
+        }
+        (selected, count)
+    }
+
+    fn draw_sprites_scanline(
         &self,
         video: &Video,
         width: u32,
-        height: u32,
+        y: u32,
         priority: u8,
-        frame: &mut [u32],
+        selected: &[u8],
+        line: &mut [u32],
     ) {
         // 大きいsprite番号から描き、同一priorityでは小さい番号を前面にする。
-        for number in (0..128).rev() {
+        for &number in selected.iter().rev() {
+            let number = usize::from(number);
             let base = number * 8;
             if self.bytes[base + 7] & 3 != priority {
                 continue;
@@ -105,49 +147,41 @@ impl SpriteBg {
                 - 16;
             let control = u16::from_be_bytes([self.bytes[base + 4], self.bytes[base + 5]]);
             let pattern = usize::from(control & 0x00ff);
-            for local_y in 0..16 {
-                let screen_y = py + local_y;
-                if !(0..height as i32).contains(&screen_y) {
+            let local_y = y as i32 - py;
+            let sy = if control & 0x8000 != 0 {
+                15 - local_y
+            } else {
+                local_y
+            } as usize;
+            for local_x in 0..16 {
+                let screen_x = px + local_x;
+                if !(0..width as i32).contains(&screen_x) {
                     continue;
                 }
-                let sy = if control & 0x8000 != 0 {
-                    15 - local_y
+                let sx = if control & 0x4000 != 0 {
+                    15 - local_x
                 } else {
-                    local_y
+                    local_x
                 } as usize;
-                for local_x in 0..16 {
-                    let screen_x = px + local_x;
-                    if !(0..width as i32).contains(&screen_x) {
-                        continue;
-                    }
-                    let sx = if control & 0x4000 != 0 {
-                        15 - local_x
-                    } else {
-                        local_x
-                    } as usize;
-                    let address = 0x8000 + pattern_address(pattern, 16, sx, sy);
-                    let packed = self.bytes.get(address).copied().unwrap_or(0);
-                    let nibble = if sx & 1 == 0 {
-                        packed >> 4
-                    } else {
-                        packed & 0x0f
-                    };
-                    if nibble != 0 {
-                        let palette = ((control >> 4) as u8 & 0xf0) | nibble;
-                        frame[screen_y as usize * width as usize + screen_x as usize] =
-                            0x1_0000 | u32::from(video.text_colour(palette));
-                    }
+                let address = 0x8000 + pattern_address(pattern, 16, sx, sy);
+                let packed = self.bytes.get(address).copied().unwrap_or(0);
+                let nibble = if sx & 1 == 0 {
+                    packed >> 4
+                } else {
+                    packed & 0x0f
+                };
+                if nibble != 0 {
+                    let palette = ((control >> 4) as u8 & 0xf0) | nibble;
+                    line[screen_x as usize] = 0x1_0000 | u32::from(video.text_colour(palette));
                 }
             }
         }
     }
 
-    fn draw_bg(&self, video: &Video, width: u32, height: u32, plane: usize, frame: &mut [u32]) {
-        for y in 0..height {
-            for x in 0..width {
-                if let Some(colour) = self.bg_pixel(video, x, y, plane) {
-                    frame[(y * width + x) as usize] = 0x1_0000 | u32::from(colour);
-                }
+    fn draw_bg_scanline(&self, video: &Video, width: u32, y: u32, plane: usize, line: &mut [u32]) {
+        for x in 0..width {
+            if let Some(colour) = self.bg_pixel(video, x, y, plane) {
+                line[x as usize] = 0x1_0000 | u32::from(colour);
             }
         }
     }
@@ -348,6 +382,31 @@ mod tests {
         sprites.write(0x8000, 0x10);
         sprites.write(0x808, 2);
         assert_eq!(sprites.pixel(&video, 0, 0), Some(0x07c0));
+    }
+
+    #[test]
+    fn scanline_selects_only_the_first_32_sprite_numbers() {
+        let mut video = Video::default();
+        video.write(0x202, 0x07);
+        video.write(0x203, 0xc0);
+        let mut sprites = SpriteBg::default();
+        sprites.write(0x808, 2);
+        sprites.write(0x8080, 0x10); // pattern 1だけを不透明にする
+        for number in 0..33 {
+            let base = number * 8;
+            sprites.write(base + 1, 16);
+            sprites.write(base + 3, 16);
+            sprites.write(base + 5, u8::from(number == 32));
+            sprites.write(base + 7, 3);
+        }
+
+        let mut line = [0u32; 1];
+        sprites.render_scanline(&video, 1, 0, &mut line);
+        assert_eq!(line[0], 0, "sprite 32 is outside the horizontal limit");
+
+        sprites.write(7, 0);
+        sprites.render_scanline(&video, 1, 0, &mut line);
+        assert_eq!(line[0], 0x1_07c0, "a free slot admits sprite 32");
     }
 
     #[test]

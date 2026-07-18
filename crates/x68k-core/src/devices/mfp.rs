@@ -49,6 +49,11 @@ impl Default for Mfp {
 }
 
 impl Mfp {
+    /// Active Edge RegisterでGPIP入力のどちらのedgeを割り込み源にするかを返す。
+    pub(crate) fn gpip_rising_edge(&self, mask: u8) -> bool {
+        self.regs[1] & mask != 0
+    }
+
     pub(crate) fn read(&mut self, offset: u32, gpip: u8) -> u8 {
         if offset > 0x2f || offset & 1 == 0 {
             return 0xff;
@@ -244,5 +249,13 @@ mod tests {
         assert_eq!(mfp.read(0x2b, 0xff) & 0x80, 0x80);
         assert_eq!(mfp.read(0x2f, 0xff), 0x2a);
         assert_eq!(mfp.read(0x2b, 0xff) & 0x80, 0);
+    }
+
+    #[test]
+    fn aer_selects_the_active_gpip_edge() {
+        let mut mfp = Mfp::default();
+        assert!(!mfp.gpip_rising_edge(0x10));
+        mfp.write(0x03, 0x16);
+        assert!(mfp.gpip_rising_edge(0x10));
     }
 }

@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum Signal {
     HorizontalSync,
     Raster,
-    VerticalSync,
+    VerticalDisplayStart,
+    VerticalDisplayEnd,
+    /// 可視領域の最終走査線を終え、1frameのscanoutが確定した。
+    FrameBoundary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,10 +104,43 @@ impl Crtc {
         if self.current_line == self.raster_line {
             signals.push(Signal::Raster);
         }
-        if self.current_line == self.v_start || self.current_line == self.v_end {
-            signals.push(Signal::VerticalSync);
+        if self.current_line == self.v_start {
+            signals.push(Signal::VerticalDisplayStart);
+        }
+        if self.current_line == self.v_end {
+            signals.push(Signal::VerticalDisplayEnd);
+        }
+        let boundary_line = if self.v_end < self.v_total {
+            self.v_end
+        } else {
+            0
+        };
+        if self.current_line == boundary_line {
+            signals.push(Signal::FrameBoundary);
         }
         signals
+    }
+
+    /// 現在のCRTC走査線が出力framebufferのどの行に対応するかを返す。
+    /// 低解像度の縦二重化では同じscanlineを2行へ、高解像度の間引きでは
+    /// 偶数scanlineだけを1行へ写す。
+    pub(crate) fn visible_output_lines(&self) -> [Option<u32>; 2] {
+        if !(self.v_start..self.v_end).contains(&self.current_line) {
+            return [None, None];
+        }
+        let line = u32::from(self.current_line - self.v_start);
+        match self.regs[0x29] & 0x14 {
+            // 31kHz/256-lineでは奇数raw scanline側で1行を確定する。
+            // PX68kのCRTC_VStep=1経路も同じedgeを採用している。
+            0x10 if self.current_line & 1 != 0 => [Some(line / 2), None],
+            0x10 => [None, None],
+            0x04 => [Some(line * 2), Some(line * 2 + 1)],
+            _ => [Some(line), None],
+        }
+    }
+
+    pub(crate) fn at_visible_start(&self) -> bool {
+        self.current_line == self.v_start
     }
 
     pub(crate) fn dimensions(&self) -> (u32, u32) {
@@ -272,5 +308,15 @@ mod tests {
         crtc.write(0x2b, 0x05, &mut tvram);
         assert_eq!(crtc.write(0x481, 2, &mut tvram), Some(0xf0f0));
         assert_eq!(crtc.read(0x481) & 2, 0);
+    }
+
+    #[test]
+    fn high_resolution_256_line_mode_samples_odd_raw_scanlines() {
+        let mut crtc = Crtc::default();
+        crtc.regs[0x29] = 0x10;
+        crtc.current_line = crtc.v_start;
+        assert_eq!(crtc.visible_output_lines(), [None, None]);
+        crtc.current_line += 1;
+        assert_eq!(crtc.visible_output_lines(), [Some(0), None]);
     }
 }
