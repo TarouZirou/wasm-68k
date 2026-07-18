@@ -7,6 +7,8 @@ import {
   isKeyMap,
   PressedKeyState,
 } from "./keyboard.js";
+import { GamepadController } from "./gamepad.js";
+import { BrowserBinaryStore } from "./storage.js";
 
 type RomTarget = "ipl" | "cgrom" | "scsi";
 type LoadTarget = RomTarget | `fdd${0 | 1 | 2 | 3}` | "hdd0" | "state";
@@ -40,15 +42,12 @@ let audioContext: AudioContext | undefined;
 let audioNode: AudioWorkletNode | undefined;
 let gainNode: GainNode | undefined;
 let midiOutput: MIDIOutput | undefined;
-let lastGamepadButtons: boolean[] = [];
-let lastGamepadAxes: number[] = [];
-let lastGamepadPort = 0;
-let lastGamepadSource = "";
 let activeModel = "x68000";
 let uiFrames = 0;
 let assetLoadInProgress = false;
-let settingsWriteQueue = Promise.resolve();
 const mountedNames = new Map<LoadTarget, string>();
+const browserStore = new BrowserBinaryStore("wasm-68k", "data");
+const gamepadController = new GamepadController();
 
 const sharpAssets = {
   x68000: {
@@ -195,7 +194,7 @@ async function createEmulator(): Promise<void> {
   backend.textContent = "初期化中…";
   if (emulator) {
     releaseTransientInputs();
-    await dbPut(`sram:${activeModel}`, emulator.export_sram()).catch(console.warn);
+    await browserStore.put(`sram:${activeModel}`, emulator.export_sram()).catch(console.warn);
     emulator.free();
   }
   mountedNames.clear();
@@ -210,7 +209,7 @@ async function createEmulator(): Promise<void> {
   $<HTMLSpanElement>("scsi-name").textContent = "未読込";
   $<HTMLParagraphElement>("cgrom-hint").hidden = false;
   $<HTMLButtonElement>("pause").textContent = "一時停止";
-  const savedSram = await dbGet(`sram:${activeModel}`).catch(() => undefined);
+  const savedSram = await browserStore.get(`sram:${activeModel}`).catch(() => undefined);
   if (savedSram) emulator.load_sram(savedSram);
   const restoredRoms = await restoreRoms();
   backend.textContent = `${emulator.model_name()} · ${emulator.backend_name()}`;
@@ -341,60 +340,18 @@ async function enableMidi(): Promise<void> {
 }
 
 function pollGamepad(): void {
-  if (!("getGamepads" in navigator)) return;
-  const pads = [...navigator.getGamepads()];
-  const selected = $<HTMLSelectElement>("gamepad-index").value;
-  const pad = selected === "auto"
-    ? pads.find((candidate): candidate is Gamepad => candidate !== null)
-    : pads[Number(selected)] ?? undefined;
-  if (!pad) {
-    releaseGamepad();
-    $<HTMLSpanElement>("gamepad-status").textContent = "未接続";
-    return;
-  }
-  const port = Number($<HTMLSelectElement>("gamepad-port").value);
-  const deadzone = Number($<HTMLInputElement>("gamepad-deadzone").value);
-  const buttonMap = parseGamepadButtons($<HTMLInputElement>("gamepad-buttons").value);
-  const source = `${pad.index}:${pad.id}:${port}:${deadzone}:${buttonMap.join(",")}`;
-  if (lastGamepadSource && source !== lastGamepadSource) releaseGamepad();
-  lastGamepadSource = source;
-  lastGamepadPort = port;
-  $<HTMLSpanElement>("gamepad-status").textContent = `${pad.index}: ${pad.id}`;
-  buttonMap.forEach((physicalIndex, emulatedButton) => {
-    const pressed = pad.buttons[physicalIndex]?.pressed ?? false;
-    if (lastGamepadButtons[emulatedButton] !== pressed) {
-      emulator.set_joystick_button(port, emulatedButton, pressed);
-      lastGamepadButtons[emulatedButton] = pressed;
-    }
-  });
-  pad.axes.slice(0, 2).forEach((axis, index) => {
-    const normalized = Math.abs(axis) <= deadzone
-      ? 0
-      : Math.sign(axis) * Math.min(1, (Math.abs(axis) - deadzone) / (1 - deadzone));
-    if (Math.abs((lastGamepadAxes[index] ?? 0) - normalized) > 0.02) {
-      emulator.set_joystick_axis(port, index, Math.round(normalized * 32767));
-      lastGamepadAxes[index] = normalized;
-    }
-  });
-}
-
-function parseGamepadButtons(value: string): number[] {
-  const parsed = value.split(",").map((item) => Number(item.trim()));
-  return parsed.length === 4 && parsed.every((item) => Number.isInteger(item) && item >= 0)
-    ? parsed
-    : [0, 1, 2, 3];
+  const pads = "getGamepads" in navigator ? [...navigator.getGamepads()] : [];
+  const connected = gamepadController.poll(pads, {
+    index: $<HTMLSelectElement>("gamepad-index").value,
+    port: Number($<HTMLSelectElement>("gamepad-port").value),
+    deadzone: Number($<HTMLInputElement>("gamepad-deadzone").value),
+    buttons: $<HTMLInputElement>("gamepad-buttons").value,
+  }, emulator);
+  $<HTMLSpanElement>("gamepad-status").textContent = connected ?? "未接続";
 }
 
 function releaseGamepad(): void {
-  lastGamepadButtons.forEach((pressed, index) => {
-    if (pressed && emulator) emulator.set_joystick_button(lastGamepadPort, index, false);
-  });
-  lastGamepadAxes.forEach((axis, index) => {
-    if (axis !== 0 && emulator) emulator.set_joystick_axis(lastGamepadPort, index, 0);
-  });
-  lastGamepadButtons = [];
-  lastGamepadAxes = [];
-  lastGamepadSource = "";
+  gamepadController.release(emulator);
 }
 
 function download(name: string, bytes: string | Uint8Array, type = "application/octet-stream"): void {
@@ -413,48 +370,6 @@ function download(name: string, bytes: string | Uint8Array, type = "application/
   setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open("wasm-68k", 1);
-    request.onupgradeneeded = () => request.result.createObjectStore("data");
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function dbPut(key: string, value: Uint8Array): Promise<void> {
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction("data", "readwrite");
-    transaction.objectStore("data").put(value, key);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-  });
-  db.close();
-}
-
-async function dbGet(key: string): Promise<Uint8Array | undefined> {
-  const db = await openDb();
-  const value = await new Promise<Uint8Array | undefined>((resolve, reject) => {
-    const request = db.transaction("data").objectStore("data").get(key);
-    request.onsuccess = () => resolve(request.result as Uint8Array | undefined);
-    request.onerror = () => reject(request.error);
-  });
-  db.close();
-  return value;
-}
-
-async function dbDelete(key: string): Promise<void> {
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction("data", "readwrite");
-    transaction.objectStore("data").delete(key);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-  });
-  db.close();
-}
-
 function romStorageKey(kind: RomTarget, suffix = "bytes", modelScope = activeModel): string {
   const scope = kind === "cgrom" ? "shared" : modelScope;
   return `rom:${kind}:${scope}:${suffix}`;
@@ -462,8 +377,8 @@ function romStorageKey(kind: RomTarget, suffix = "bytes", modelScope = activeMod
 
 async function persistRom(kind: RomTarget, name: string, bytes: Uint8Array): Promise<void> {
   await Promise.all([
-    dbPut(romStorageKey(kind), bytes),
-    dbPut(romStorageKey(kind, "name"), new TextEncoder().encode(name)),
+    browserStore.put(romStorageKey(kind), bytes),
+    browserStore.put(romStorageKey(kind, "name"), new TextEncoder().encode(name)),
   ]);
 }
 
@@ -471,11 +386,11 @@ async function restoreRoms(): Promise<string[]> {
   const restored: string[] = [];
   // IPLはload時にresetするため、他のROMとSRAMを接続した後に最後に復元する。
   for (const kind of ["cgrom", "scsi", "ipl"] as const) {
-    const bytes = await dbGet(romStorageKey(kind)).catch(() => undefined);
+    const bytes = await browserStore.get(romStorageKey(kind)).catch(() => undefined);
     if (!bytes) continue;
     try {
       emulator.load_rom(kind, bytes);
-      const savedName = await dbGet(romStorageKey(kind, "name")).catch(() => undefined);
+      const savedName = await browserStore.get(romStorageKey(kind, "name")).catch(() => undefined);
       const name = savedName ? new TextDecoder().decode(savedName) : `${kind.toUpperCase()}（保存済み）`;
       $<HTMLSpanElement>(`${kind}-name`).textContent = name;
       if (kind === "cgrom") $<HTMLParagraphElement>("cgrom-hint").hidden = true;
@@ -494,7 +409,7 @@ async function clearPersistedRoms(): Promise<void> {
       keys.push(romStorageKey(kind, "bytes", profile), romStorageKey(kind, "name", profile));
     }
   }
-  await Promise.all(keys.map(dbDelete));
+  await Promise.all(keys.map((key) => browserStore.delete(key)));
   message("保存IPL/SCSI ROMと共通CGROMをすべて消去しました（現在の実行中ROMは次の機種切替まで有効です）");
 }
 
@@ -515,16 +430,11 @@ function settingsBytes(): Uint8Array {
 }
 
 function saveSettings(): Promise<void> {
-  const bytes = settingsBytes();
-  const write = settingsWriteQueue
-    .catch(() => undefined)
-    .then(() => dbPut("settings", bytes));
-  settingsWriteQueue = write;
-  return write;
+  return browserStore.putSerialized("settings", settingsBytes());
 }
 
 async function restoreSettings(): Promise<void> {
-  const bytes = await dbGet("settings").catch(() => undefined);
+  const bytes = await browserStore.get("settings").catch(() => undefined);
   if (bytes) {
     try {
       const settings = JSON.parse(new TextDecoder().decode(bytes)) as Partial<Record<string, unknown>>;
@@ -551,13 +461,13 @@ async function restoreSettings(): Promise<void> {
       console.warn("破損した保存設定を無視しました", error);
     }
   }
-  const savedMap = await dbGet("keymap").catch(() => undefined);
+  const savedMap = await browserStore.get("keymap").catch(() => undefined);
   if (savedMap) {
     try {
       const candidate = JSON.parse(new TextDecoder().decode(savedMap)) as unknown;
       const restored = decodeKeyMap(candidate);
       keyMap = restored.keyMap;
-      if (restored.migrated) await dbPut("keymap", encodeKeyMap(keyMap));
+      if (restored.migrated) await browserStore.put("keymap", encodeKeyMap(keyMap));
     } catch (error) {
       console.warn("破損したキーマップを無視しました", error);
     }
@@ -713,20 +623,20 @@ function wireUi(): void {
       if (!isKeyMap(value)) throw new Error("キーマップはキー名と0〜127の整数scancodeで指定してください");
       releaseAllKeys();
       keyMap = value;
-      void dbPut("keymap", encodeKeyMap(value)).then(() => message("キーマップを保存しました")).catch(showError);
+      void browserStore.put("keymap", encodeKeyMap(value)).then(() => message("キーマップを保存しました")).catch(showError);
     } catch (error) { showError(error); }
   };
   $<HTMLButtonElement>("reset-keymap").onclick = () => {
     releaseAllKeys();
     keyMap = { ...defaultKeyMap };
     $<HTMLTextAreaElement>("keymap").value = JSON.stringify(keyMap, null, 2);
-    void dbPut("keymap", encodeKeyMap(keyMap))
+    void browserStore.put("keymap", encodeKeyMap(keyMap))
       .then(() => message("X68000既定キーマップへ戻しました"))
       .catch(showError);
   };
   const stateSlot = () => $<HTMLSelectElement>("state-slot").value;
-  $<HTMLButtonElement>("save-state").onclick = () => void dbPut(`state:${model.value}:${stateSlot()}`, emulator.save_state()).then(() => message(`保存状態スロット${stateSlot()}へ保存しました`)).catch(showError);
-  $<HTMLButtonElement>("load-state").onclick = () => void dbGet(`state:${model.value}:${stateSlot()}`).then((state) => { if (!state) throw new Error("保存状態がありません"); emulator.load_state(state); message(`保存状態スロット${stateSlot()}を復元しました`); }).catch(showError);
+  $<HTMLButtonElement>("save-state").onclick = () => void browserStore.put(`state:${model.value}:${stateSlot()}`, emulator.save_state()).then(() => message(`保存状態スロット${stateSlot()}へ保存しました`)).catch(showError);
+  $<HTMLButtonElement>("load-state").onclick = () => void browserStore.get(`state:${model.value}:${stateSlot()}`).then((state) => { if (!state) throw new Error("保存状態がありません"); emulator.load_state(state); message(`保存状態スロット${stateSlot()}を復元しました`); }).catch(showError);
   $<HTMLButtonElement>("export-state").onclick = () => download(`wasm-68k-${model.value}.x68state`, emulator.save_state());
   $<HTMLButtonElement>("import-state").onclick = () => { loadTarget = "state"; picker.accept = ".x68state"; picker.click(); };
   $<HTMLButtonElement>("diagnostics").onclick = () => download("wasm-68k-diagnostics.json", emulator.diagnostics(), "application/json");
@@ -768,7 +678,7 @@ function animate(timestamp: number): void {
   }
   uiFrames += 1;
   if (uiFrames % 300 === 0) {
-    void dbPut(`sram:${activeModel}`, emulator.export_sram()).catch(console.warn);
+    void browserStore.put(`sram:${activeModel}`, emulator.export_sram()).catch(console.warn);
   }
   requestAnimationFrame(animate);
 }
