@@ -22,7 +22,10 @@ fn main() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or_else(|| if model == MachineModel::X68030 { 12 } else { 2 });
-    let ipl = fs::read(root.join("web/public/sharp").join(ipl_name)).expect("official IPL");
+    let ipl_path = std::env::var_os("X68K_IPL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("web/public/sharp").join(ipl_name));
+    let ipl = fs::read(&ipl_path).expect("official IPL");
     let floppy_path = std::env::var_os("X68K_FDD0")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("web/public/sharp/HUMAN302.XDF"));
@@ -61,6 +64,25 @@ fn main() {
         "profile={profile} initial_pc={initial_pc:08x} initial_sp={initial_sp:08x} initial_sr={initial_sr:04x}"
     );
 
+    if let Ok(count) = std::env::var("X68K_TRACE_INSTRUCTIONS") {
+        let count = count.parse::<usize>().expect("instruction count");
+        for index in 0..count {
+            let (pc, opcode, sp, sr, cycles) = machine.step_instruction_diagnostics();
+            let (mnemonic, _) = m68k::dasm::disassemble(
+                pc,
+                opcode,
+                match model {
+                    MachineModel::X68000 | MachineModel::X68000Xvi => m68k::CpuType::M68000,
+                    MachineModel::X68030 => m68k::CpuType::M68EC030,
+                },
+            );
+            println!(
+                "instruction={index} pc={pc:08x} opcode={opcode:04x} {mnemonic} sp={sp:08x} sr={sr:04x} cycles={cycles}"
+            );
+        }
+        return;
+    }
+
     let mut previous = (0, 0);
     let trace_every_frame = std::env::var_os("X68K_TRACE_EVERY").is_some();
     let trace_from = std::env::var("X68K_TRACE_FROM")
@@ -74,19 +96,49 @@ fn main() {
         .ok()
         .and_then(|value| u8::from_str_radix(value.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0x35);
+    let mut key_events = std::env::var("X68K_KEYS")
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .filter_map(|event| {
+                    let (frame, scan) = event.split_once(':')?;
+                    Some((
+                        frame.parse::<u32>().ok()?,
+                        u8::from_str_radix(scan.trim_start_matches("0x"), 16).ok()?,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    if let Some(frame) = key_at {
+        key_events.push((frame, key_scancode));
+    }
+    let mut audio_peak = 0.0f32;
+    let mut audio_samples = 0usize;
     for frame in 1..=frames {
-        if key_at == Some(frame) {
+        for &(_, scancode) in key_events.iter().filter(|(at, _)| *at == frame) {
             machine.input(InputEvent::Key {
-                scancode: key_scancode,
+                scancode,
                 pressed: true,
             });
-        } else if key_at.is_some_and(|at| frame == at.saturating_add(1)) {
+        }
+        for &(_, scancode) in key_events
+            .iter()
+            .filter(|(at, _)| frame == at.saturating_add(1))
+        {
             machine.input(InputEvent::Key {
-                scancode: key_scancode,
+                scancode,
                 pressed: false,
             });
         }
         let result = machine.run_frame();
+        let samples = machine.drain_audio();
+        audio_samples += samples.len();
+        audio_peak = samples
+            .into_iter()
+            .fold(audio_peak, |peak, sample| peak.max(sample.abs()));
         if trace_every_frame && frame >= trace_from
             || (result.width, result.height) != previous
             || matches!(frame, 1 | 2 | 5 | 10 | 30 | 60 | 120 | 180)
@@ -121,6 +173,7 @@ fn main() {
             previous = (result.width, result.height);
         }
     }
+    println!("audio_samples={audio_samples} audio_peak={audio_peak:.6}");
     if let Some(path) = std::env::var_os("X68K_TRACE_PPM") {
         let (width, height) = machine.screen_dimensions();
         let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();

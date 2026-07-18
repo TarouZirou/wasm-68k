@@ -66,38 +66,9 @@ impl CpuCore {
     /// Process TRAP #n instruction.
     pub fn trap<B: AddressBus>(&mut self, bus: &mut B, trap_num: u8) -> i32 {
         let vector = vector::TRAP_BASE + (trap_num & 0xF) as u32;
-
-        // Musashi 68020/68030 uses "format 2" stack frame for TRAP exceptions.
-        // 68040+ uses format 0 (same as simple exceptions).
-        let uses_format_2 = matches!(
-            self.cpu_type,
-            super::types::CpuType::M68EC020
-                | super::types::CpuType::M68020
-                | super::types::CpuType::M68EC030
-                | super::types::CpuType::M68030
-        );
-        if uses_format_2 {
-            let old_sr = self.get_sr();
-            // Match Musashi m68ki_init_exception: enter supervisor, clear trace.
-            self.set_s_flag(SFLAG_SET);
-            self.t1_flag = 0;
-            self.t0_flag = 0;
-
-            // Stacked PC for TRAP is the next instruction.
-            let stacked_pc = self.pc;
-            let vec_word = (vector as u16) << 2;
-
-            // Musashi m68ki_stack_frame_0010:
-            // push PPC (long), then 0x2000|(vector<<2) (word), then PC (long), then SR (word)
-            self.push_32(bus, self.ppc);
-            self.push_16(bus, 0x2000 | (vec_word & 0x0FFF));
-            self.push_32(bus, stacked_pc);
-            self.push_16(bus, old_sr);
-
-            self.jump_vector(bus, vector);
-            return self.exception_cycles(vector);
-        }
-
+        // TRAP #nは68010以降でもformat 0を積む。format 2はCHK等の
+        // instruction exception用であり、ここで使うとhandlerがframeを
+        // format 0として参照するX68030 IPLでRTE/stackが破壊される。
         self.take_exception(bus, vector)
     }
 

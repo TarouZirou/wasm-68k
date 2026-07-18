@@ -8,7 +8,8 @@ import {
   PressedKeyState,
 } from "./keyboard.js";
 
-type LoadTarget = "ipl" | "cgrom" | "scsi" | `fdd${0 | 1 | 2 | 3}` | "hdd0" | "state";
+type RomTarget = "ipl" | "cgrom" | "scsi";
+type LoadTarget = RomTarget | `fdd${0 | 1 | 2 | 3}` | "hdd0" | "state";
 // wasm-pack生成物がエディタ上で一世代古くても、Rust側の安定公開APIを型として
 // 保持する。実体の存在はPages E2Eで検証する。
 type Emulator = WebX68k & {
@@ -41,9 +42,12 @@ let gainNode: GainNode | undefined;
 let midiOutput: MIDIOutput | undefined;
 let lastGamepadButtons: boolean[] = [];
 let lastGamepadAxes: number[] = [];
+let lastGamepadPort = 0;
+let lastGamepadSource = "";
 let activeModel = "x68000";
 let uiFrames = 0;
 let assetLoadInProgress = false;
+let settingsWriteQueue = Promise.resolve();
 const mountedNames = new Map<LoadTarget, string>();
 
 const sharpAssets = {
@@ -157,13 +161,14 @@ async function bootOfficialHuman68k(): Promise<void> {
       fetchVerifiedSharpAsset(human302),
     ]);
     message("公式配布物のhash検証が完了しました。媒体を接続しています…");
-    if (mountedNames.has("fdd0")) exportMounted("fdd0", true);
+    if (mountedNames.has("fdd0")) ejectMounted("fdd0");
     emulator.mount_media("floppy", 0, "xdf", disk, true);
     mountedNames.set("fdd0", human302.name);
     $<HTMLSpanElement>("fdd0-name").textContent = human302.name;
     $<HTMLInputElement>("write-protect").checked = true;
     message("公式媒体を接続しました。IPLをリセットしています…");
     emulator.load_rom("ipl", ipl);
+    await persistRom("ipl", sharpAssets[selected].ipl.name, ipl);
     emulator.set_paused(autoPauseAfterFirstFrame);
     $<HTMLButtonElement>("pause").textContent = autoPauseAfterFirstFrame ? "再開" : "一時停止";
     started = true;
@@ -191,8 +196,11 @@ async function createEmulator(): Promise<void> {
   if (emulator) {
     releaseTransientInputs();
     await dbPut(`sram:${activeModel}`, emulator.export_sram()).catch(console.warn);
-    for (const target of [...mountedNames.keys()]) exportMounted(target, true);
     emulator.free();
+  }
+  mountedNames.clear();
+  for (const drive of ["fdd0", "fdd1", "fdd2", "fdd3", "hdd0"] as const) {
+    $<HTMLSpanElement>(`${drive}-name`).textContent = "空";
   }
   activeModel = model.value;
   emulator = await WebX68k.create(canvas, model.value) as Emulator;
@@ -204,21 +212,25 @@ async function createEmulator(): Promise<void> {
   $<HTMLButtonElement>("pause").textContent = "一時停止";
   const savedSram = await dbGet(`sram:${activeModel}`).catch(() => undefined);
   if (savedSram) emulator.load_sram(savedSram);
+  const restoredRoms = await restoreRoms();
   backend.textContent = `${emulator.model_name()} · ${emulator.backend_name()}`;
   emulatorReady = true;
   canvas.dataset.emulatorReady = "true";
   emulator.set_volume(Number($<HTMLInputElement>("volume").value));
   updateVideoOptions();
   fitCanvas();
-  message("準備完了。IPLを読み込むか、内蔵の診断IPLを起動してください。");
+  message(restoredRoms.length
+    ? `保存ROMを復元しました: ${restoredRoms.join(" / ")}`
+    : "準備完了。IPLを読み込むか、内蔵の診断IPLを起動してください。");
 }
 
 function fitCanvas(): void {
   if (!emulator || !emulatorReady) return;
+  const fixed = $<HTMLSelectElement>("display-size").value === "768x512";
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
-  const width = Math.max(1, Math.round(rect.width * dpr));
-  const height = Math.max(1, Math.round(rect.height * dpr));
+  const width = fixed ? 768 : Math.max(1, Math.round(rect.width * dpr));
+  const height = fixed ? 512 : Math.max(1, Math.round(rect.height * dpr));
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
@@ -250,12 +262,14 @@ async function loadFile(file: File, target: LoadTarget): Promise<void> {
     emulator.load_rom(target, bytes);
     $<HTMLSpanElement>(`${target}-name`).textContent = file.name;
     if (target === "cgrom") $<HTMLParagraphElement>("cgrom-hint").hidden = true;
-    message(`${target.toUpperCase()}を読み込みました: ${file.name}`);
+    await persistRom(target, file.name, bytes);
+    message(`${target.toUpperCase()}を読み込み、次回用に保存しました: ${file.name}`);
     return;
   }
   const isHdd = target === "hdd0";
   const drive = isHdd ? 0 : Number(target.at(-1));
-  const format = isHdd ? "hdf" : extension(file.name);
+  const suffix = extension(file.name);
+  const format = isHdd ? "hdf" : suffix === "2hd" ? "xdf" : suffix;
   emulator.mount_media(
     isHdd ? "hard-disk" : "floppy",
     drive,
@@ -274,18 +288,20 @@ function mediaTarget(target: LoadTarget): { kind: "floppy" | "hard-disk"; drive:
   throw new Error(`${target} is not a media drive`);
 }
 
-function exportMounted(target: LoadTarget, eject: boolean): void {
+function exportMounted(target: LoadTarget): void {
   const { kind, drive } = mediaTarget(target);
-  const bytes = eject
-    ? emulator.eject_media(kind, drive)
-    : emulator.export_media(kind, drive);
+  const bytes = emulator.export_media(kind, drive);
   const original = mountedNames.get(target) ?? `${target}.img`;
   download(`changed-${original}`, bytes);
-  if (eject) {
-    mountedNames.delete(target);
-    $<HTMLSpanElement>(`${target}-name`).textContent = "空";
-    message(`${target.toUpperCase()}を排出し、変更媒体を書き出しました`);
-  }
+  message(`${target.toUpperCase()}の変更媒体を書き出しました`);
+}
+
+function ejectMounted(target: LoadTarget): void {
+  const { kind, drive } = mediaTarget(target);
+  emulator.eject_media(kind, drive);
+  mountedNames.delete(target);
+  $<HTMLSpanElement>(`${target}-name`).textContent = "空";
+  message(`${target.toUpperCase()}を排出しました（自動書出しなし）`);
 }
 
 function inferTarget(file: File): LoadTarget {
@@ -325,34 +341,60 @@ async function enableMidi(): Promise<void> {
 }
 
 function pollGamepad(): void {
-  const pad = navigator.getGamepads()[0];
+  if (!("getGamepads" in navigator)) return;
+  const pads = [...navigator.getGamepads()];
+  const selected = $<HTMLSelectElement>("gamepad-index").value;
+  const pad = selected === "auto"
+    ? pads.find((candidate): candidate is Gamepad => candidate !== null)
+    : pads[Number(selected)] ?? undefined;
   if (!pad) {
     releaseGamepad();
+    $<HTMLSpanElement>("gamepad-status").textContent = "未接続";
     return;
   }
-  pad.buttons.forEach((button, index) => {
-    if (lastGamepadButtons[index] !== button.pressed) {
-      emulator.set_joystick_button(0, index, button.pressed);
-      lastGamepadButtons[index] = button.pressed;
+  const port = Number($<HTMLSelectElement>("gamepad-port").value);
+  const deadzone = Number($<HTMLInputElement>("gamepad-deadzone").value);
+  const buttonMap = parseGamepadButtons($<HTMLInputElement>("gamepad-buttons").value);
+  const source = `${pad.index}:${pad.id}:${port}:${deadzone}:${buttonMap.join(",")}`;
+  if (lastGamepadSource && source !== lastGamepadSource) releaseGamepad();
+  lastGamepadSource = source;
+  lastGamepadPort = port;
+  $<HTMLSpanElement>("gamepad-status").textContent = `${pad.index}: ${pad.id}`;
+  buttonMap.forEach((physicalIndex, emulatedButton) => {
+    const pressed = pad.buttons[physicalIndex]?.pressed ?? false;
+    if (lastGamepadButtons[emulatedButton] !== pressed) {
+      emulator.set_joystick_button(port, emulatedButton, pressed);
+      lastGamepadButtons[emulatedButton] = pressed;
     }
   });
   pad.axes.slice(0, 2).forEach((axis, index) => {
-    if (Math.abs((lastGamepadAxes[index] ?? 0) - axis) > 0.02) {
-      emulator.set_joystick_axis(0, index, Math.round(axis * 32767));
-      lastGamepadAxes[index] = axis;
+    const normalized = Math.abs(axis) <= deadzone
+      ? 0
+      : Math.sign(axis) * Math.min(1, (Math.abs(axis) - deadzone) / (1 - deadzone));
+    if (Math.abs((lastGamepadAxes[index] ?? 0) - normalized) > 0.02) {
+      emulator.set_joystick_axis(port, index, Math.round(normalized * 32767));
+      lastGamepadAxes[index] = normalized;
     }
   });
 }
 
+function parseGamepadButtons(value: string): number[] {
+  const parsed = value.split(",").map((item) => Number(item.trim()));
+  return parsed.length === 4 && parsed.every((item) => Number.isInteger(item) && item >= 0)
+    ? parsed
+    : [0, 1, 2, 3];
+}
+
 function releaseGamepad(): void {
   lastGamepadButtons.forEach((pressed, index) => {
-    if (pressed && emulator) emulator.set_joystick_button(0, index, false);
+    if (pressed && emulator) emulator.set_joystick_button(lastGamepadPort, index, false);
   });
   lastGamepadAxes.forEach((axis, index) => {
-    if (axis !== 0 && emulator) emulator.set_joystick_axis(0, index, 0);
+    if (axis !== 0 && emulator) emulator.set_joystick_axis(lastGamepadPort, index, 0);
   });
   lastGamepadButtons = [];
   lastGamepadAxes = [];
+  lastGamepadSource = "";
 }
 
 function download(name: string, bytes: string | Uint8Array, type = "application/octet-stream"): void {
@@ -402,6 +444,60 @@ async function dbGet(key: string): Promise<Uint8Array | undefined> {
   return value;
 }
 
+async function dbDelete(key: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction("data", "readwrite");
+    transaction.objectStore("data").delete(key);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+  db.close();
+}
+
+function romStorageKey(kind: RomTarget, suffix = "bytes", modelScope = activeModel): string {
+  const scope = kind === "cgrom" ? "shared" : modelScope;
+  return `rom:${kind}:${scope}:${suffix}`;
+}
+
+async function persistRom(kind: RomTarget, name: string, bytes: Uint8Array): Promise<void> {
+  await Promise.all([
+    dbPut(romStorageKey(kind), bytes),
+    dbPut(romStorageKey(kind, "name"), new TextEncoder().encode(name)),
+  ]);
+}
+
+async function restoreRoms(): Promise<string[]> {
+  const restored: string[] = [];
+  // IPLはload時にresetするため、他のROMとSRAMを接続した後に最後に復元する。
+  for (const kind of ["cgrom", "scsi", "ipl"] as const) {
+    const bytes = await dbGet(romStorageKey(kind)).catch(() => undefined);
+    if (!bytes) continue;
+    try {
+      emulator.load_rom(kind, bytes);
+      const savedName = await dbGet(romStorageKey(kind, "name")).catch(() => undefined);
+      const name = savedName ? new TextDecoder().decode(savedName) : `${kind.toUpperCase()}（保存済み）`;
+      $<HTMLSpanElement>(`${kind}-name`).textContent = name;
+      if (kind === "cgrom") $<HTMLParagraphElement>("cgrom-hint").hidden = true;
+      restored.push(name);
+    } catch (error) {
+      console.warn(`${kind}の保存ROMを復元できませんでした`, error);
+    }
+  }
+  return restored;
+}
+
+async function clearPersistedRoms(): Promise<void> {
+  const keys = [romStorageKey("cgrom"), romStorageKey("cgrom", "name")];
+  for (const profile of ["x68000", "xvi", "x68030"]) {
+    for (const kind of ["ipl", "scsi"] as const) {
+      keys.push(romStorageKey(kind, "bytes", profile), romStorageKey(kind, "name", profile));
+    }
+  }
+  await Promise.all(keys.map(dbDelete));
+  message("保存IPL/SCSI ROMと共通CGROMをすべて消去しました（現在の実行中ROMは次の機種切替まで有効です）");
+}
+
 function settingsBytes(): Uint8Array {
   return new TextEncoder().encode(JSON.stringify({
     model: model.value,
@@ -410,11 +506,21 @@ function settingsBytes(): Uint8Array {
     scanline: $<HTMLInputElement>("scanline").value,
     mask: $<HTMLInputElement>("mask").value,
     curvature: $<HTMLInputElement>("curvature").value,
+    displaySize: $<HTMLSelectElement>("display-size").value,
+    gamepadIndex: $<HTMLSelectElement>("gamepad-index").value,
+    gamepadPort: $<HTMLSelectElement>("gamepad-port").value,
+    gamepadDeadzone: $<HTMLInputElement>("gamepad-deadzone").value,
+    gamepadButtons: $<HTMLInputElement>("gamepad-buttons").value,
   }));
 }
 
-async function saveSettings(): Promise<void> {
-  await dbPut("settings", settingsBytes());
+function saveSettings(): Promise<void> {
+  const bytes = settingsBytes();
+  const write = settingsWriteQueue
+    .catch(() => undefined)
+    .then(() => dbPut("settings", bytes));
+  settingsWriteQueue = write;
+  return write;
 }
 
 async function restoreSettings(): Promise<void> {
@@ -428,6 +534,19 @@ async function restoreSettings(): Promise<void> {
       restoreRange("scanline", settings.scanline);
       restoreRange("mask", settings.mask);
       restoreRange("curvature", settings.curvature);
+      if (["auto", "768x512"].includes(String(settings.displaySize))) {
+        $<HTMLSelectElement>("display-size").value = String(settings.displaySize);
+      }
+      if (["auto", "0", "1", "2", "3"].includes(String(settings.gamepadIndex))) {
+        $<HTMLSelectElement>("gamepad-index").value = String(settings.gamepadIndex);
+      }
+      if (["0", "1"].includes(String(settings.gamepadPort))) {
+        $<HTMLSelectElement>("gamepad-port").value = String(settings.gamepadPort);
+      }
+      restoreRange("gamepad-deadzone", settings.gamepadDeadzone);
+      if (typeof settings.gamepadButtons === "string") {
+        $<HTMLInputElement>("gamepad-buttons").value = settings.gamepadButtons;
+      }
     } catch (error) {
       console.warn("破損した保存設定を無視しました", error);
     }
@@ -492,8 +611,8 @@ function wireUi(): void {
   $<HTMLButtonElement>("reset").onclick = () => { emulator.reset(); message("リセットしました"); };
   $<HTMLButtonElement>("diagnostic-rom").onclick = () => {
     if (!emulatorReady) return;
-    if (mountedNames.has("fdd0")) exportMounted("fdd0", true);
-    if (mountedNames.has("hdd0")) exportMounted("hdd0", true);
+    if (mountedNames.has("fdd0")) ejectMounted("fdd0");
+    if (mountedNames.has("hdd0")) ejectMounted("hdd0");
     emulator.mount_media("floppy", 0, "xdf", createDiagnosticXdf(), true);
     emulator.mount_media("hard-disk", 0, "hdf", createDiagnosticHdf(), true);
     mountedNames.set("fdd0", "builtin-diagnostic.xdf");
@@ -516,16 +635,22 @@ function wireUi(): void {
   };
   $<HTMLButtonElement>("fullscreen").onclick = () => void canvas.requestFullscreen();
   document.querySelectorAll<HTMLButtonElement>("button[data-load]").forEach((button) => {
-    button.onclick = () => { loadTarget = button.dataset.load as LoadTarget; picker.accept = loadTarget === "hdd0" ? ".hdf" : ""; picker.click(); };
+    button.onclick = () => {
+      loadTarget = button.dataset.load as LoadTarget;
+      picker.accept = loadTarget === "hdd0"
+        ? ".hdf"
+        : loadTarget.startsWith("fdd") ? ".xdf,.dim,.d88,.88d,.2hd" : "";
+      picker.click();
+    };
   });
   document.querySelectorAll<HTMLButtonElement>("button[data-export]").forEach((button) => {
     button.onclick = () => {
-      try { exportMounted(button.dataset.export as LoadTarget, false); } catch (error) { showError(error); }
+      try { exportMounted(button.dataset.export as LoadTarget); } catch (error) { showError(error); }
     };
   });
   document.querySelectorAll<HTMLButtonElement>("button[data-eject]").forEach((button) => {
     button.onclick = () => {
-      try { exportMounted(button.dataset.eject as LoadTarget, true); } catch (error) { showError(error); }
+      try { ejectMounted(button.dataset.eject as LoadTarget); } catch (error) { showError(error); }
     };
   });
   picker.onchange = () => {
@@ -564,6 +689,24 @@ function wireUi(): void {
     void saveSettings().catch(console.warn);
   };
   for (const id of ["crt", "scanline", "mask", "curvature"]) $<HTMLInputElement>(id).oninput = () => { updateVideoOptions(); void saveSettings().catch(console.warn); };
+  $<HTMLSelectElement>("display-size").onchange = () => {
+    fitCanvas();
+    void saveSettings().catch(console.warn);
+  };
+  const updateGamepadSettings = () => {
+    releaseGamepad();
+    void saveSettings().catch(console.warn);
+  };
+  for (const id of ["gamepad-index", "gamepad-port"]) {
+    $<HTMLSelectElement>(id).onchange = updateGamepadSettings;
+  }
+  for (const id of ["gamepad-deadzone", "gamepad-buttons"]) {
+    $<HTMLInputElement>(id).oninput = () => {
+      releaseGamepad();
+      void saveSettings().catch(console.warn);
+    };
+  }
+  $<HTMLButtonElement>("clear-roms").onclick = () => void clearPersistedRoms().catch(showError);
   $<HTMLButtonElement>("apply-keymap").onclick = () => {
     try {
       const value = JSON.parse($<HTMLTextAreaElement>("keymap").value) as Record<string, number>;

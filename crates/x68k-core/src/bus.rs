@@ -158,9 +158,10 @@ impl Bus {
             gvram: GraphicVram::default(),
             tvram: vec![0; TVRAM_SIZE],
             sprite_ram: SpriteBg::default(),
-            // 電池切れ／sram.dat未作成時の実装慣例に合わせ、未初期化SRAMは
-            // 0xffで始める。X68030 IPLは設定領域を起動直後に参照する。
-            sram: vec![0xff; SRAM_SIZE],
+            // 初期化済みSRAMの予約領域は0。特にX68030 IPLは例外vectorを
+            // 構築する前に$ED0091（起動音）を参照するため、消去状態の0xffを
+            // そのまま公開すると未初期化TRAP #15へ入りstackを破壊する。
+            sram: vec![0; SRAM_SIZE],
             ipl: Vec::new(),
             cgrom: Vec::new(),
             scsi_rom: Vec::new(),
@@ -686,6 +687,15 @@ impl Bus {
         if (SPRITE_BASE..SPRITE_BASE + 0x1_0000).contains(&address) {
             return Some(self.sprite_ram.read(address - SPRITE_BASE));
         }
+        // SRAM $ED0008.w はIPL/Human68kが参照する搭載RAM容量（64KiB単位）。
+        // 実SRAM dumpの初期値に依存させると0xffffを巨大なRAMとして解釈し、
+        // 実在しない領域へメモリ管理情報を書いて実行不能になる。
+        if address == SRAM_BASE + 8 {
+            return Some(((self.ram.len() >> 16) as u16).to_be_bytes()[0]);
+        }
+        if address == SRAM_BASE + 9 {
+            return Some(((self.ram.len() >> 16) as u16).to_be_bytes()[1]);
+        }
         if let Some(value) = get_range(&self.sram, SRAM_BASE, address) {
             return Some(value);
         }
@@ -701,12 +711,11 @@ impl Bus {
             );
         }
         let scsi_base = self.scsi_rom_base();
-        if self.model != MachineModel::X68000
-            && (self.scsi_rom.is_empty() || scsi_base != 0x00fc_0000)
+        if (self.scsi_rom.is_empty() || scsi_base != 0x00fc_0000)
             && (0x00fc_0000..0x00fe_0000).contains(&address)
         {
-            // The internal-SCSI window remains decoded on XVI/030 even when
-            // an external 8 KiB ROM is selected at $EA0000.
+            // 内蔵SCSI未搭載機でもIPL/Human68kと一部ゲームは$FC0000窓を
+            // 存在確認する。ROMが無い場合はdata bus pull-upとして応答する。
             return Some(0xff);
         }
         if let Some(value) = get_range(&self.scsi_rom, scsi_base, address) {
@@ -716,6 +725,11 @@ impl Bus {
         let ipl_base = 0x0100_0000u32.saturating_sub(self.ipl.len() as u32);
         if let Some(value) = get_range(&self.ipl, ipl_base, address) {
             return Some(value);
+        }
+        if self.model == MachineModel::X68030 && address >= 0x0100_0000 {
+            // 030 IPL/Human68kの拡張RAM走査。未搭載の32bit空間はwriteが
+            // retainされないopen busとして見せ、比較による容量判定を行わせる。
+            return Some(0xff);
         }
         self.read_io(address)
     }
@@ -755,12 +769,15 @@ impl Bus {
         if (CGROM_BASE..CGROM_BASE + CGROM_SIZE).contains(&address)
             || (!self.scsi_rom.is_empty()
                 && (scsi_base..scsi_base + self.scsi_rom.len() as u32).contains(&address))
-            || (self.model != MachineModel::X68000 && (0x00fc_0000..0x00fe_0000).contains(&address))
+            || (0x00fc_0000..0x00fe_0000).contains(&address)
             || (!self.ipl.is_empty()
                 && (ipl_base..ipl_base + self.ipl.len() as u32).contains(&address))
         {
             // ROMは書換わらないがバスcycle自体には応答する。no-op writeを
             // bus errorにするとX68030 IPLのROM/protection probeが例外暴走する。
+            return true;
+        }
+        if self.model == MachineModel::X68030 && address >= 0x0100_0000 {
             return true;
         }
         self.write_io(address, value)
@@ -823,6 +840,12 @@ impl Bus {
                 self.devices.hdc.read(offset, &self.media)
             });
         }
+        if self.is_disconnected_legacy_hdc(address) {
+            // XVI/030のIPLは初代SASI窓を存在確認する。未接続窓をCPUの
+            // bus errorへ送ると、復帰frame未実装の命令でstackを壊すため、
+            // data bus pull-up相当のopen busとして応答する。
+            return Some(0xff);
+        }
         match address {
             CRTC_BASE..=0xe8_1fff => {
                 return Some(self.devices.crtc.read(address - CRTC_BASE));
@@ -881,6 +904,12 @@ impl Bus {
             MIDI_BASE..=0xea_faff => {
                 return Some(self.devices.midi.read(address - MIDI_BASE));
             }
+            0xea_0000..=0xea_ffff if self.model == MachineModel::X68030 => {
+                // X68030 IPLは拡張I/O空間を走査する。未装着slotはpull-upされた
+                // data busとして扱い、未実装の68030 format-A bus-error frameへ
+                // 入って起動状態を壊さないようにする。
+                return Some(0xff);
+            }
             _ => return None,
         }
     }
@@ -904,6 +933,9 @@ impl Bus {
             } else {
                 self.devices.hdc.write(offset, value, &mut self.media);
             }
+            return true;
+        }
+        if self.is_disconnected_legacy_hdc(address) {
             return true;
         }
         match address {
@@ -999,6 +1031,7 @@ impl Bus {
                 }
                 return true;
             }
+            0xea_0000..=0xea_ffff if self.model == MachineModel::X68030 => return true,
             _ => return false,
         }
     }
@@ -1024,6 +1057,10 @@ impl Bus {
             }
             _ => None,
         }
+    }
+
+    fn is_disconnected_legacy_hdc(&self, address: u32) -> bool {
+        self.model != MachineModel::X68000 && (HDC_BASE..HDC_BASE + 0x20).contains(&address)
     }
 }
 
@@ -1224,15 +1261,24 @@ mod tests {
         bus.write_byte(0x0100_0020, 0x55);
         assert_eq!(bus.ram[0x20], 0x55);
         bus.model = MachineModel::X68030;
-        assert!(bus.try_write_byte(0x0100_0020, 0x11).is_err());
+        assert!(bus.try_write_byte(0x0100_0020, 0x11).is_ok());
+        assert_eq!(bus.try_read_byte(0x0100_0020).unwrap(), 0xff);
         bus.write_byte(0xff00_0020, 0x66);
         assert_eq!(bus.ram[0x20], 0x66);
     }
 
     #[test]
-    fn uninitialized_sram_uses_erased_bytes() {
+    fn fresh_sram_uses_initialized_reserved_bytes() {
         let bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
-        assert!(bus.sram.iter().all(|&byte| byte == 0xff));
+        assert!(bus.sram.iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn sram_ram_size_word_reports_installed_memory() {
+        let mut bus = Bus::new(&MachineConfig::default(), 4 * 1024 * 1024);
+        assert_eq!(bus.read_word(SRAM_BASE + 8), 0x0040);
+        assert_eq!(bus.read_byte(SRAM_BASE + 7), 0);
+        assert_eq!(bus.read_byte(SRAM_BASE + 10), 0);
     }
 
     #[test]
@@ -1240,7 +1286,8 @@ mod tests {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         assert_eq!(bus.try_read_byte(CGROM_BASE).unwrap(), 0);
         assert_eq!(bus.try_read_byte(CGROM_BASE + CGROM_SIZE - 1).unwrap(), 0);
-        assert!(bus.try_read_byte(CGROM_BASE + CGROM_SIZE).is_err());
+        // 直後の$FC0000は未装着内蔵SCSI ROMのopen-bus窓。
+        assert_eq!(bus.try_read_byte(CGROM_BASE + CGROM_SIZE).unwrap(), 0xff);
         bus.cgrom = vec![0xa5; CGROM_SIZE as usize];
         assert_eq!(bus.try_read_byte(CGROM_BASE + 123).unwrap(), 0xa5);
     }
@@ -1574,7 +1621,8 @@ mod tests {
                 },
                 1024 * 1024,
             );
-            assert!(bus.read_io(HDC_BASE + 1).is_none());
+            assert_eq!(bus.read_io(HDC_BASE + 1), Some(0xff));
+            assert!(bus.write_io(HDC_BASE + 1, 0x55));
             assert!(bus.read_io(HDC_BASE + 0x21).is_some());
         }
     }

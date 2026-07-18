@@ -15,7 +15,15 @@
       "license": "Freeware (user-supplied test image; not redistributed)",
       "models": ["x68000"],
       "status": "pass",
-      "notes": "Manual regression for SHA-256 6d8169ef89654fd7986b65eecfb5444dc496ac8e2f888b385a6b531ea3ef2146. Boots past the 128 KiB fixed-buffer message to the credits screen and accepts X68000 Space make/break input to reach the ver1.10 information screen. CI covers the underlying active-low MFP GPIP HSync edges with a synthetic bus test; the disk image is never committed."
+      "notes": "Manual regression for SHA-256 6d8169ef89654fd7986b65eecfb5444dc496ac8e2f888b385a6b531ea3ef2146. With 4 MiB RAM it boots past the fixed-buffer/main-memory checks into gameplay, renders the player/background layers at 256x256, and produces deterministic non-silent PCM (observed peak 0.514167). The disk image is never committed."
+    },
+    {
+      "id": "otoko-dan-1-00",
+      "title": "男弾 ver1.00",
+      "license": "User-supplied test image (not redistributed)",
+      "models": ["x68000"],
+      "status": "pass",
+      "notes": "Manual regression for SHA-256 62630c749e9ab81a8963f8cb60a80d11e1ed8998404e2ab572a54b4c34cbda74. The .2HD raw image boots with 12 MiB RAM, DSHELL launches GAME.BAT, the 256x256 title layers render, and non-silent PCM is generated (observed peak 0.394531). The disk image is never committed."
     }
   ]
 }

@@ -31,6 +31,9 @@ impl WebX68k {
             .map_err(js_error)?;
         let machine = Machine::new(MachineConfig {
             model,
+            // 市販ソフトの固定buffer・常駐driverと、RAM終端を直接走査する
+            // ソフトの双方に対応するため、Web版は全機種を実機上限の12MiBにする。
+            ram_bytes: 12 * 1024 * 1024,
             ..MachineConfig::default()
         })
         .map_err(js_error)?;
@@ -54,17 +57,19 @@ impl WebX68k {
                 self.machine.run_frame();
             }
             Some(previous) => {
-                // 高リフレッシュレート画面でも実機時間は60Hzで進める。タブ復帰時は
-                // 最大250msに制限し、長時間のcatch-upでUIを占有しない。
+                // 高リフレッシュレート画面でも実機時間は60Hzで進める。1回の
+                // requestAnimationFrameで複数frameを追い掛けると、負荷の高い
+                // 25MHz/診断実行でUI threadを占有し続けるため、遅延分は捨てる。
                 let elapsed = if timestamp.is_finite() && previous.is_finite() {
                     (timestamp - previous).clamp(0.0, 250.0)
                 } else {
                     FRAME_MS
                 };
                 self.frame_accumulator_ms += elapsed;
-                while self.frame_accumulator_ms + f64::EPSILON >= FRAME_MS {
+                if self.frame_accumulator_ms + f64::EPSILON >= FRAME_MS {
                     self.machine.run_frame();
-                    self.frame_accumulator_ms -= FRAME_MS;
+                    self.frame_accumulator_ms =
+                        (self.frame_accumulator_ms - FRAME_MS).min(FRAME_MS);
                 }
             }
         }
@@ -329,7 +334,8 @@ fn parse_drive(kind: &str, number: u8) -> Result<DriveId, JsValue> {
 
 fn parse_format(value: &str) -> Result<MediaFormat, JsValue> {
     match value.to_ascii_lowercase().as_str() {
-        "xdf" => Ok(MediaFormat::Xdf),
+        // .2HDはXDFと同じ1232KiB raw 2HD imageとして流通している別拡張子。
+        "xdf" | "2hd" => Ok(MediaFormat::Xdf),
         "dim" => Ok(MediaFormat::Dim),
         "d88" | "88d" => Ok(MediaFormat::D88),
         "hdf" => Ok(MediaFormat::Hdf),

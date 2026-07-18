@@ -245,6 +245,13 @@ fn dispatch_group_f<B: AddressBus>(cpu: &mut CpuCore, bus: &mut B, opcode: u16) 
     // PMMU/COP0 opcodes are in the 0xF0xx/0xF1xx range (1111 000? .... ....) and are further
     // subdivided by (opcode>>9)&7. Group 0 carries PMOVE/PFLUSH/PTEST/etc with an extension word.
     if ((opcode >> 9) & 0x7) == 0 {
+        if cpu.cpu_type == CpuType::M68EC030 {
+            // X68030 IPLはMMU搭載版への換装にも対応する共通初期化列として
+            // PFLUSH/PMOVEを発行する。EC030にはMMU状態が無いのでextensionを
+            // 消費してno-opとし、未初期化の起動時例外vectorへ落とさない。
+            let _ = cpu.read_imm_16(bus);
+            return 4;
+        }
         let cycles = cpu.exec_mmu_op0(bus, opcode);
         if cycles != 0 {
             return cycles;

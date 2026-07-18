@@ -60,13 +60,15 @@ cargo run -p x68k-native
 
 1. Select X68000, XVI or X68030.
 2. Use “公式Human68kを起動”, or load your own `iplrom.dat` and `cgrom.dat`.
-3. Mount `.xdf`, `.dim`, `.d88`/`.88d`, or `.hdf` images.
+3. Mount `.xdf`/`.2hd`, `.dim`, `.d88`/`.88d`, or `.hdf` images.
 4. Click the screen to send keyboard input. Double-click it for mouse capture.
 5. Audio and MIDI require an explicit button click because browsers require a
    user gesture/permission.
 
-All images stay inside the browser. ROMs and software are not uploaded or
-stored automatically. IndexedDB contains only settings, SRAM and save states.
+All images stay inside the browser and are never uploaded. User-selected IPL,
+CGROM and SCSI ROM files are retained in IndexedDB for the next visit and can
+be removed with “保存ROMを消去”; floppy/HDD software is never retained
+automatically. IndexedDB also contains settings, SRAM and save states.
 The core displays black until an IPL is loaded; the former Phase 0 test pattern
 is no longer part of the emulator path.
 

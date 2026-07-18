@@ -100,6 +100,10 @@ test("settings persist in IndexedDB and the renderer resizes", async ({ page }) 
   await page.locator("#volume").fill("0.31");
   await page.locator("#mask").fill("0.42");
   await page.locator("#crt").check();
+  await page.locator("#gamepad-port").selectOption({ value: "1" });
+  await expect(page.locator("#gamepad-port")).toHaveValue("1");
+  await page.locator("#gamepad-deadzone").fill("0.35");
+  await page.locator("#gamepad-buttons").fill("2,3,0,1");
   await expect.poll(async () => page.evaluate(async () => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("wasm-68k", 1);
@@ -112,19 +116,62 @@ test("settings persist in IndexedDB and the renderer resizes", async ({ page }) 
       request.onerror = () => reject(request.error);
     });
     db.close();
-    return value ? new TextDecoder().decode(value) : "";
-  })).toContain('"mask":"0.42"');
+    return value
+      ? JSON.parse(new TextDecoder().decode(value)) as { gamepadPort?: string; gamepadButtons?: string }
+      : {};
+  })).toMatchObject({ gamepadPort: "1", gamepadButtons: "2,3,0,1" });
 
   await page.reload();
   await expect(page.locator("#status")).toContainText("準備完了");
   await expect(page.locator("#volume")).toHaveValue("0.31");
   await expect(page.locator("#mask")).toHaveValue("0.42");
   await expect(page.locator("#crt")).toBeChecked();
+  await expect(page.locator("#gamepad-port")).toHaveValue("1");
+  await expect(page.locator("#gamepad-deadzone")).toHaveValue("0.35");
+  await expect(page.locator("#gamepad-buttons")).toHaveValue("2,3,0,1");
 
   const before = await page.locator("#screen").evaluate((canvas: HTMLCanvasElement) => canvas.width);
   await page.setViewportSize({ width: 720, height: 700 });
   await expect.poll(() => page.locator("#screen").evaluate((canvas: HTMLCanvasElement) => canvas.width))
     .not.toBe(before);
+
+  await page.locator("#display-size").selectOption("768x512");
+  await expect.poll(() => page.locator("#screen").evaluate((canvas: HTMLCanvasElement) => [canvas.width, canvas.height]))
+    .toEqual([768, 512]);
+});
+
+test("ROMs persist locally, while 2HD eject never downloads automatically", async ({ page }) => {
+  await page.goto("/wasm-68k/");
+  await expect(page.locator("#status")).toContainText("準備完了");
+  await page.locator('button[data-load="cgrom"]').click();
+  await page.locator("#file-picker").setInputFiles({
+    name: "CGROM.DAT",
+    mimeType: "application/octet-stream",
+    buffer: Buffer.alloc(0x0c_0000),
+  });
+  await expect(page.locator("#status")).toContainText("次回用に保存しました");
+
+  await page.reload();
+  await expect(page.locator("#status")).toContainText("保存ROMを復元しました");
+  await expect(page.locator("#cgrom-name")).toHaveText("CGROM.DAT");
+
+  let downloads = 0;
+  page.on("download", () => { downloads += 1; });
+  await page.locator('button[data-load="fdd0"]').click();
+  await page.locator("#file-picker").setInputFiles({
+    name: "raw-disk.2HD",
+    mimeType: "application/octet-stream",
+    buffer: Buffer.alloc(1_261_568),
+  });
+  await expect(page.locator("#fdd0-name")).toHaveText("raw-disk.2HD");
+  await page.locator('button[data-eject="fdd0"]').click();
+  await expect(page.locator("#fdd0-name")).toHaveText("空");
+  expect(downloads).toBe(0);
+
+  await page.locator("#clear-roms").click();
+  await expect(page.locator("#status")).toContainText("保存IPL/SCSI ROMと共通CGROMをすべて消去しました");
+  await page.reload();
+  await expect(page.locator("#cgrom-name")).toHaveText("未読込");
 });
 
 test("X68000 keyboard map replaces legacy PC scan codes", async ({ page }) => {

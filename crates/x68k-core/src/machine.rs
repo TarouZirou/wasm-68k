@@ -335,6 +335,28 @@ impl Machine {
         self.bus.input(event);
     }
 
+    /// 互換性調査用にCPUを1命令だけ進め、実行前PC/opcodeと実行後SPを返す。
+    #[doc(hidden)]
+    pub fn step_instruction_diagnostics(&mut self) -> (u32, u16, u32, u16, i32) {
+        let pc = self.cpu.pc;
+        let opcode = self.bus.read_word(pc);
+        let irq = self.bus.pending_irq();
+        self.cpu.set_irq(irq);
+        self.bus.set_supervisor(self.cpu.is_supervisor());
+        let mut ignored_trap = None;
+        let mut recorder = TrapRecorder {
+            last: &mut ignored_trap,
+        };
+        let cycles = match self.cpu.step_with_hle_handler(&mut self.bus, &mut recorder) {
+            StepResult::Ok { cycles } => cycles.max(1),
+            StepResult::Stopped => 1,
+            _ => unreachable!("HLE handler returns real exceptions"),
+        };
+        let wait = self.bus.take_wait_cycles() as i32;
+        self.bus.tick((cycles + wait).max(1) as u32);
+        (pc, opcode, self.cpu.sp(), self.cpu.get_sr(), cycles + wait)
+    }
+
     pub fn run_frame(&mut self) -> FrameResult {
         // `audio` is a pending FIFO and may contain samples from earlier
         // frames when the host does not drain it immediately.  Keep the

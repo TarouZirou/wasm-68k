@@ -198,7 +198,7 @@
 				></canvas>
 				<p id="status" role="status">Wasmを読み込んでいます…</p>
 				<p class="hint">
-					ROMやディスクは外部へ送信されません。画面へドロップするか、右のボタンから読み込んでください。
+					ROMやディスクは外部へ送信されません。読み込んだROMだけをこのブラウザ内へ保存し、次回起動時に復元します。
 				</p>
 			</section>
 			<aside>
@@ -241,6 +241,9 @@
 					<p class="cgrom-hint" id="scsi-hint">
 						SCSIINROM.DATはX68030内蔵用です。X68000/XVIの拡張用はSCSIEXROM.DATを使用してください。
 					</p>
+					<div class="toolbar">
+						<button id="clear-roms">保存ROMを消去</button>
+					</div>
 					<div class="media-row">
 						<span>自己診断</span
 						><span class="media-name">内蔵・著作物なし</span
@@ -316,6 +319,13 @@
 						><button id="midi">MIDIを有効化</button>
 					</div>
 					<div class="row">
+						<label for="display-size">描画解像度</label
+						><select id="display-size">
+							<option value="auto">画面に合わせる</option>
+							<option value="768x512">768 × 512</option>
+						</select>
+					</div>
+					<div class="row">
 						<label for="volume">音量</label
 						><input
 							id="volume"
@@ -365,6 +375,32 @@
 				</fieldset>
 				<fieldset>
 					<legend>入力設定</legend>
+					<div class="row">
+						<label for="gamepad-index">ゲームパッド</label
+						><select id="gamepad-index">
+							<option value="auto">自動</option>
+							<option value="0">0</option>
+							<option value="1">1</option>
+							<option value="2">2</option>
+							<option value="3">3</option>
+						</select>
+					</div>
+					<div class="row">
+						<label for="gamepad-port">X68kポート</label
+						><select id="gamepad-port">
+							<option value="0">1</option>
+							<option value="1">2</option>
+						</select>
+					</div>
+					<div class="row">
+						<label for="gamepad-deadzone">スティック遊び</label
+						><input id="gamepad-deadzone" type="range" min="0" max="0.9" step="0.05" value="0.25" />
+					</div>
+					<div class="row">
+						<label for="gamepad-buttons">A/B/C/Dボタン番号</label
+						><input id="gamepad-buttons" value="0,1,2,3" size="9" />
+					</div>
+					<p class="media-name">接続: <span id="gamepad-status">未接続</span></p>
 					<details>
 						<summary>キーマップ JSON</summary>
 						<textarea

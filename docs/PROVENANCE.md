@@ -71,7 +71,8 @@ for register layout and behavioural comparison:
   base memory map and the X68k I/O map at
   `https://datacrystal.tcrf.net/wiki/X68k/IOMAP`; the two write-only ports are
   modelled locally without importing implementation code. New SRAM starts at
-  `0xff`, matching PX68k `x68k/sram.c` when no `sram.dat` exists.
+  `0x00`, matching the initialized reserved fields expected by the X68030 IPL;
+  `$ED0008.w` is derived from installed RAM rather than persisted SRAM bytes.
 - `crates/x68k-core/src/scheduler.rs` — timing constants and resolution mode
   comparison against `x68k/crtc.c` and `crtc.h`; the fractional event queue is
   an original Rust implementation.
