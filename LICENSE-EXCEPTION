@@ -1,0 +1,17 @@
+wasm-68k linking exception
+
+Copyright (C) 2026 the wasm-68k copyright holders.
+
+As an additional permission under version 2 of the GNU General Public License,
+the copyright holders of wasm-68k grant you permission to link or combine the
+GPL-2.0-only covered wasm-68k source with independent components that are
+licensed solely under the Apache License, Version 2.0 (including the LLVM
+exception where applicable), and to distribute the resulting work under the
+terms of GPL-2.0-only. This permission applies only to those independent
+components and does not relicense any wasm-68k source or any separately
+licensed ROM/media asset.
+
+This exception is part of the license notice for wasm-68k and does not remove
+the obligations of GPL-2.0-only for the covered source. Components that offer
+a GPL-compatible alternative license should continue to be used under that
+alternative where documented in THIRD_PARTY_NOTICES.md.

@@ -1,6 +1,35 @@
-[package]
-name = "wasm-68k"
+[workspace]
+resolver = "3"
+members = [
+    "crates/x68k-core",
+    "crates/x68k-native",
+    "crates/x68k-render",
+    "crates/x68k-wasm",
+]
+# x68k-wasm は wasm32 ターゲット専用のため、ホスト向けのデフォルトビルドからは外す
+default-members = [
+    "crates/x68k-core",
+    "crates/x68k-native",
+    "crates/x68k-render",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "GPL-2.0-only"
 
-[dependencies]
+[workspace.dependencies]
+x68k-core = { path = "crates/x68k-core" }
+x68k-render = { path = "crates/x68k-render" }
+
+[patch.crates-io]
+# m68k 0.2.1を固定vendorし、68000 bus/address error frameのSR/PC順を
+# 修正する。由来とcrate hashはdocs/PROVENANCE.mdに記録する。
+m68k = { path = "vendor/m68k" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = true
+codegen-units = 1

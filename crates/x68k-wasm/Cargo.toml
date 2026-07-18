@@ -1,0 +1,22 @@
+[package]
+name = "x68k-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for the wasm-68k X68000 emulator"
+repository = "https://github.com/TarouZirou/wasm-68k"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+console_error_panic_hook = "0.1.7"
+js-sys = "0.3.103"
+wasm-bindgen = "0.2.126"
+wasm-bindgen-futures = "0.4.76"
+web-sys = { version = "0.3.103", features = ["HtmlCanvasElement", "console"] }
+x68k-core.workspace = true
+x68k-render.workspace = true
+
+[lints]
+workspace = true

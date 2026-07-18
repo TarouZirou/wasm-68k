@@ -1,0 +1,14 @@
+pub(crate) mod audio;
+pub(crate) mod crtc;
+pub(crate) mod dma;
+pub(crate) mod fdc;
+pub(crate) mod gvram;
+pub(crate) mod hdc;
+pub(crate) mod mfp;
+pub(crate) mod midi;
+pub(crate) mod ppi;
+pub(crate) mod rtc;
+pub(crate) mod scc;
+pub(crate) mod sprite;
+pub(crate) mod system_port;
+pub(crate) mod video;

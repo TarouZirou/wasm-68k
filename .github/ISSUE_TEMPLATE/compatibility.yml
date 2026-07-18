@@ -1,0 +1,91 @@
+name: Compatibility report
+description: Report results without attaching copyrighted ROM or media files
+title: "[compat] "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never attach IPL/CGROM, Human68k, game, floppy, or HDD images. Hashes and the diagnostic JSON are sufficient.
+  - type: input
+    id: title
+    attributes:
+      label: Software title
+    validations:
+      required: true
+  - type: dropdown
+    id: model
+    attributes:
+      label: Machine model
+      options: [X68000 10MHz, X68000 XVI 16MHz, X68030 25MHz]
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: [Pass, Playable with issues, Boots only, Does not boot, Regression]
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build identifier
+      description: Copy the version/build fields from the diagnostic JSON.
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Rendering backend
+      options: [WebGPU, WebGL2 fallback, Native Vulkan/Metal/DX12, Native GLES, Other native]
+    validations:
+      required: true
+  - type: dropdown
+    id: boot
+    attributes:
+      label: Boot result
+      options: [Pass, Pass with issues, Fail, Not applicable]
+    validations:
+      required: true
+  - type: dropdown
+    id: input
+    attributes:
+      label: Input/operation result
+      options: [Pass, Pass with issues, Fail, Not tested]
+    validations:
+      required: true
+  - type: dropdown
+    id: video
+    attributes:
+      label: Video result
+      options: [Pass, Pass with issues, Fail, Not tested]
+    validations:
+      required: true
+  - type: dropdown
+    id: audio
+    attributes:
+      label: Audio result
+      options: [Pass, Pass with issues, Fail, Not tested]
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic JSON and image hashes
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Reproduction steps and observed behaviour
+    validations:
+      required: true
+  - type: checkboxes
+    id: legal
+    attributes:
+      label: Asset policy
+      options:
+        - label: I have not attached or linked to copyrighted ROM/software images.
+          required: true

@@ -1,1 +1,9 @@
 /target
+node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+# XM6等からユーザーが用意したROM/DLL。Pages・Gitへは含めない。
+local-assets/
+# wasm-pack の生成物 (npm run build:wasm で再生成できる)
+web/src/wasm/

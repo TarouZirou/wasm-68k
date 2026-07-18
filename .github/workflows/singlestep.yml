@@ -1,0 +1,29 @@
+name: Full 68000 instruction suite
+
+on:
+  schedule:
+    - cron: "19 18 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-m68000:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout pinned SingleStepTests corpus
+        uses: actions/checkout@v4
+        with:
+          repository: SingleStepTests/m68000
+          ref: 64b253116a3de04aaac4346c43680960dc9b67e5
+          path: target/singlestep-m68000
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run all upstream-verified instruction groups
+        env:
+          M68000_SST_DIR: target/singlestep-m68000/v1
+          M68000_SST_REVISION: 64b253116a3de04aaac4346c43680960dc9b67e5
+        run: >-
+          cargo test --locked -p x68k-core --test singlestep_m68000
+          full_binary_corpus_from_pinned_revision -- --ignored --exact

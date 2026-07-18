@@ -1,0 +1,13 @@
+{
+  "$schema": "./catalog.schema.json",
+  "entries": [
+    {
+      "id": "builtin-diagnostic",
+      "title": "Built-in synthetic IPL and XDF",
+      "license": "GPL-2.0-only",
+      "models": ["x68000", "xvi", "x68030"],
+      "status": "pass",
+      "notes": "Self-authored public software generated in-browser. Validates CPU execution, CRTC raster IRQ, GVRAM/TVRAM/sprite composition, HD63450 DMA, FDC/XDF, SASI or internal SCSI/HDF, YM2151, MSM6258, MIDI and the render path without copyrighted assets."
+    }
+  ]
+}

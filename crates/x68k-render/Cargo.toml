@@ -1,0 +1,23 @@
+[package]
+name = "x68k-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.103"
+bytemuck = "1.25.1"
+log = "0.4.33"
+# webgl: WebGPU が使えないブラウザ向け WebGL2 フォールバック
+wgpu = { version = "30.0.0", features = ["webgl"] }
+wgpu-types = "30"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3.103", features = ["HtmlCanvasElement"] }
+
+[dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+
+[lints]
+workspace = true

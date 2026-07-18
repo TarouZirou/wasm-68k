@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="ja">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta
+			name="description"
+			content="RustとWebAssemblyで動作するSharp X68000エミュレータ"
+		/>
+		<title>wasm-68k — X68000 Emulator</title>
+		<style>
+			:root {
+				color-scheme: dark;
+				font-family: Inter, "Hiragino Sans", "Yu Gothic", sans-serif;
+			}
+			* {
+				box-sizing: border-box;
+			}
+			body {
+				margin: 0;
+				min-height: 100vh;
+				background: #0b0f14;
+				color: #d8dee9;
+			}
+			button,
+			select,
+			input {
+				font: inherit;
+			}
+			button,
+			select,
+			input[type="file"] {
+				border: 1px solid #39485a;
+				border-radius: 6px;
+				background: #18212c;
+				color: inherit;
+				padding: 7px 10px;
+			}
+			button {
+				cursor: pointer;
+			}
+			button:hover {
+				background: #223044;
+			}
+			button:disabled {
+				cursor: not-allowed;
+				opacity: 0.5;
+			}
+			header {
+				display: flex;
+				align-items: baseline;
+				gap: 14px;
+				padding: 14px max(16px, calc((100vw - 1440px) / 2));
+				border-bottom: 1px solid #253140;
+			}
+			h1 {
+				margin: 0;
+				font-size: 20px;
+				letter-spacing: 0.03em;
+			}
+			#backend {
+				color: #8ea0b5;
+				font-size: 12px;
+			}
+			main {
+				width: min(1440px, 100%);
+				margin: auto;
+				display: grid;
+				grid-template-columns: minmax(0, 1fr) 330px;
+				gap: 14px;
+				padding: 14px;
+			}
+			.screen-wrap {
+				min-width: 0;
+			}
+			#screen {
+				display: block;
+				width: 100%;
+				aspect-ratio: 3/2;
+				background: #000;
+				border: 1px solid #303d4d;
+				border-radius: 8px;
+				outline: none;
+			}
+			#screen.drop {
+				border-color: #63b3ed;
+				box-shadow: 0 0 0 3px #3182ce55;
+			}
+			.hint,
+			#status {
+				margin: 8px 2px;
+				color: #91a2b6;
+				font-size: 12px;
+				min-height: 1.4em;
+			}
+			#status.error {
+				color: #ff8e8e;
+			}
+			aside {
+				display: flex;
+				flex-direction: column;
+				gap: 10px;
+			}
+			fieldset {
+				margin: 0;
+				border: 1px solid #2b3949;
+				border-radius: 8px;
+				padding: 10px;
+			}
+			legend {
+				color: #aab9ca;
+				padding: 0 5px;
+				font-size: 12px;
+			}
+			.row {
+				display: flex;
+				align-items: center;
+				gap: 7px;
+				margin: 6px 0;
+			}
+			.row > label:first-child {
+				flex: 1;
+				font-size: 13px;
+			}
+			.row input[type="range"] {
+				width: 105px;
+			}
+			.media-row {
+				display: grid;
+				grid-template-columns: 52px 1fr auto;
+				gap: 6px;
+				align-items: center;
+				margin: 6px 0;
+			}
+			.media-name {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+				font-size: 12px;
+				color: #9fb0c3;
+			}
+			.cgrom-hint {
+				margin: 4px 0 0 58px;
+				color: #d7b779;
+				font-size: 11px;
+			}
+			.toolbar {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 7px;
+			}
+			.danger {
+				color: #ffb0b0;
+			}
+			.official-software {
+				margin-top: 10px;
+				padding-top: 9px;
+				border-top: 1px solid #2b3949;
+				font-size: 12px;
+			}
+			.official-software p {
+				margin: 0 0 7px;
+			}
+			footer {
+				max-width: 1440px;
+				margin: auto;
+				padding: 2px 16px 18px;
+				color: #718196;
+				font-size: 12px;
+			}
+			a {
+				color: #7cc4ff;
+			}
+			@media (max-width: 900px) {
+				main {
+					grid-template-columns: 1fr;
+				}
+				aside {
+					display: grid;
+					grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<header>
+			<h1>wasm-68k</h1>
+			<span id="backend">初期化中…</span>
+		</header>
+		<main>
+			<section class="screen-wrap">
+				<canvas
+					id="screen"
+					width="768"
+					height="512"
+					tabindex="0"
+					aria-label="X68000 screen"
+				></canvas>
+				<p id="status" role="status">Wasmを読み込んでいます…</p>
+				<p class="hint">
+					ROMやディスクは外部へ送信されません。画面へドロップするか、右のボタンから読み込んでください。
+				</p>
+			</section>
+			<aside>
+				<fieldset>
+					<legend>本体</legend>
+					<div class="row">
+						<label for="model">機種</label
+						><select id="model">
+							<option value="x68000">X68000 10MHz</option>
+							<option value="xvi">XVI 16MHz</option>
+							<option value="x68030">X68030 25MHz</option>
+						</select>
+					</div>
+					<div class="toolbar">
+						<button id="reset">リセット</button
+						><button id="pause">一時停止</button
+						><button id="fullscreen">全画面</button>
+					</div>
+				</fieldset>
+				<fieldset>
+					<legend>ROM</legend>
+					<div class="media-row">
+						<span>IPL</span
+						><span class="media-name" id="ipl-name">未読込</span
+						><button data-load="ipl">読込</button>
+					</div>
+					<div class="media-row">
+						<span>CG</span
+						><span class="media-name" id="cgrom-name">未読込</span
+						><button data-load="cgrom">読込</button>
+					</div>
+					<p class="cgrom-hint" id="cgrom-hint">
+						未読込時はCGROM由来の文字が空フォントになります（画面の一線や点滅は起動途中のTVRAM表示です）。
+					</p>
+					<div class="media-row">
+						<span>SCSI ROM</span
+						><span class="media-name" id="scsi-name">未読込</span
+						><button data-load="scsi">読込</button>
+					</div>
+					<p class="cgrom-hint" id="scsi-hint">
+						SCSIINROM.DATはX68030内蔵用です。X68000/XVIの拡張用はSCSIEXROM.DATを使用してください。
+					</p>
+					<div class="media-row">
+						<span>自己診断</span
+						><span class="media-name">内蔵・著作物なし</span
+						><button id="diagnostic-rom">診断IPL起動</button>
+					</div>
+					<div class="official-software">
+						<p>
+							Sharp公式配布の機種別IPLとHuman68k 3.02を、FDD0を書込保護して起動します。
+						</p>
+						<button id="official-software">公式Human68kを起動</button>
+						<p class="danger">
+							Xシリーズ／エミュレータ専用・非商用のみ。
+							<a href="./sharp/SHARP_LICENSE_UTF8.txt" target="_blank" rel="license noopener">Sharp許諾条件</a>
+						</p>
+					</div>
+				</fieldset>
+				<fieldset>
+					<legend>ドライブ</legend>
+					<div class="media-row">
+						<span>FDD0</span
+						><span class="media-name" id="fdd0-name">空</span
+						><span class="toolbar"
+							><button data-load="fdd0">挿入</button
+							><button data-export="fdd0">書出</button
+							><button data-eject="fdd0">排出</button></span
+						>
+					</div>
+					<div class="media-row">
+						<span>FDD1</span
+						><span class="media-name" id="fdd1-name">空</span
+						><span class="toolbar"
+							><button data-load="fdd1">挿入</button
+							><button data-export="fdd1">書出</button
+							><button data-eject="fdd1">排出</button></span
+						>
+					</div>
+					<div class="media-row">
+						<span>FDD2</span
+						><span class="media-name" id="fdd2-name">空</span
+						><span class="toolbar"
+							><button data-load="fdd2">挿入</button
+							><button data-export="fdd2">書出</button
+							><button data-eject="fdd2">排出</button></span
+						>
+					</div>
+					<div class="media-row">
+						<span>FDD3</span
+						><span class="media-name" id="fdd3-name">空</span
+						><span class="toolbar"
+							><button data-load="fdd3">挿入</button
+							><button data-export="fdd3">書出</button
+							><button data-eject="fdd3">排出</button></span
+						>
+					</div>
+					<div class="media-row">
+						<span>HDD0</span
+						><span class="media-name" id="hdd0-name">空</span
+						><span class="toolbar"
+							><button data-load="hdd0">接続</button
+							><button data-export="hdd0">書出</button
+							><button data-eject="hdd0">切断</button></span
+						>
+					</div>
+					<label class="row"
+						><span>書込保護</span
+						><input id="write-protect" type="checkbox"
+					/></label>
+				</fieldset>
+				<fieldset>
+					<legend>音声・映像</legend>
+					<div class="toolbar">
+						<button id="audio">音声を開始</button
+						><button id="midi">MIDIを有効化</button>
+					</div>
+					<div class="row">
+						<label for="volume">音量</label
+						><input
+							id="volume"
+							type="range"
+							min="0"
+							max="1"
+							step="0.01"
+							value="0.7"
+						/>
+					</div>
+					<label class="row"
+						><span>CRT効果</span><input id="crt" type="checkbox"
+					/></label>
+					<div class="row">
+						<label for="scanline">走査線</label
+						><input
+							id="scanline"
+							type="range"
+							min="0"
+							max="1"
+							step="0.01"
+							value="0.25"
+						/>
+					</div>
+					<div class="row">
+						<label for="mask">シャドウマスク</label
+						><input
+							id="mask"
+							type="range"
+							min="0"
+							max="1"
+							step="0.01"
+							value="0.12"
+						/>
+					</div>
+					<div class="row">
+						<label for="curvature">曲率</label
+						><input
+							id="curvature"
+							type="range"
+							min="0"
+							max="0.25"
+							step="0.005"
+							value="0.04"
+						/>
+					</div>
+				</fieldset>
+				<fieldset>
+					<legend>入力設定</legend>
+					<details>
+						<summary>キーマップ JSON</summary>
+						<textarea
+							id="keymap"
+							rows="7"
+							style="width: 100%"
+						></textarea
+						><button id="apply-keymap">適用・保存</button>
+					</details>
+				</fieldset>
+				<fieldset>
+					<legend>保存・診断</legend>
+					<div class="row">
+						<label for="state-slot">状態スロット</label
+						><select id="state-slot">
+							<option>0</option>
+							<option>1</option>
+							<option>2</option>
+							<option>3</option>
+							<option>4</option>
+							<option>5</option>
+							<option>6</option>
+							<option>7</option>
+							<option>8</option>
+							<option>9</option>
+						</select>
+					</div>
+					<div class="toolbar">
+						<button id="save-state">状態保存</button
+						><button id="load-state">状態復元</button
+						><button id="export-state">書出</button
+						><button id="import-state">読込</button
+						><button id="diagnostics">診断JSON</button>
+					</div>
+				</fieldset>
+			</aside>
+		</main>
+		<footer>
+			<a href="./LICENSE">GPL-2.0-only</a> · <a href="./LICENSE-EXCEPTION">リンク例外</a> ·
+			<a href="./THIRD_PARTY_NOTICES.md">第三者通知</a> · Rust / WebAssembly / WebGPU ·
+			Sharp公式IPL・Human68k 3.02は<a href="./sharp/SHARP_LICENSE_UTF8.txt" rel="license">別許諾・非商用</a> ·
+			CGROM・ゲームは同梱していません
+		</footer>
+		<input id="file-picker" type="file" hidden />
+		<!-- 相対URLにして、Pagesの /wasm-68k/ サブパスでも開発サーバーでも同じ入口にする。 -->
+		<script type="module" src="./src/main.ts"></script>
+	</body>
+</html>

@@ -1,0 +1,3 @@
+# wgpu の Web バックエンドが web-sys の不安定 API (GPU* 型) を使うため必須
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]
