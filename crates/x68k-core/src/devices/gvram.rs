@@ -10,6 +10,7 @@ pub(crate) struct GraphicVram {
 }
 
 impl Default for GraphicVram {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             bytes: vec![0; 0x80000],
@@ -18,6 +19,7 @@ impl Default for GraphicVram {
 }
 
 impl GraphicVram {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&self, address: u32, memory_mode: u8) -> u8 {
         let address = address & 0x1f_ffff;
         match mode(memory_mode) {
@@ -73,6 +75,7 @@ impl GraphicVram {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(&mut self, address: u32, value: u8, memory_mode: u8) {
         let address = address & 0x1f_ffff;
         match mode(memory_mode) {
@@ -109,11 +112,13 @@ impl GraphicVram {
         }
     }
 
+    /// 入力値を `word` に対応する内部表現へ変換して返す。
     pub(crate) fn word(&self, x: u32, y: u32) -> (u8, u8) {
         let offset = (((y & 511) * 512 + (x & 511)) * 2) as usize;
         (self.bytes[offset], self.bytes[offset + 1])
     }
 
+    /// CRTC高速クリア領域のVRAMをハードウェア指定値で消去する。
     pub(crate) fn fast_clear(
         &mut self,
         retain_mask: u16,
@@ -134,6 +139,7 @@ impl GraphicVram {
     }
 }
 
+/// 現在のレジスタ値または入力から `mode` に対応する描画・転送情報を算出して返す。
 fn mode(memory_mode: u8) -> u8 {
     if memory_mode & 8 != 0 {
         4
@@ -144,6 +150,7 @@ fn mode(memory_mode: u8) -> u8 {
     }
 }
 
+/// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
 fn set_nibble(bytes: &mut [u8], index: usize, value: u8, high: bool) {
     if let Some(byte) = bytes.get_mut(index) {
         *byte = if high {
@@ -159,6 +166,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `cpu_window_round_trips_all_colour_modes` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn cpu_window_round_trips_all_colour_modes() {
         for memory_mode in [4, 0, 1, 8] {
             let mut vram = GraphicVram::default();
@@ -171,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    /// `fast_clear_obeys_scroll_wrap_and_plane_mask` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn fast_clear_obeys_scroll_wrap_and_plane_mask() {
         let mut vram = GraphicVram {
             bytes: vec![0xff; 0x80000],

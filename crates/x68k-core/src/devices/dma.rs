@@ -53,12 +53,14 @@ pub(crate) struct Dma {
 }
 
 impl Default for Dma {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self::new(MachineModel::X68000)
     }
 }
 
 impl Dma {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     pub(crate) fn new(model: MachineModel) -> Self {
         Self {
             channels: std::array::from_fn(|_| Channel::default()),
@@ -72,6 +74,7 @@ impl Dma {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&self, offset: u32) -> u8 {
         if offset >= 0x100 {
             return 0;
@@ -102,6 +105,7 @@ impl Dma {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(&mut self, offset: u32, value: u8) {
         if offset >= 0x100 {
             return;
@@ -171,6 +175,7 @@ impl Dma {
         }
     }
 
+    /// DMA転送後のアドレス・残量・終了条件を更新する。
     pub(crate) fn next_transfer(&self, channel: usize) -> Option<Transfer> {
         let state = self.channels.get(channel)?;
         if state.csr & 0x08 == 0 || state.ccr & 0x20 != 0 || state.mtc == 0 {
@@ -241,10 +246,12 @@ impl Dma {
         false
     }
 
+    /// `interrupt_pending` の条件が現在成立しているかを、副作用なく判定して返す。
     pub(crate) fn interrupt_pending(&self) -> bool {
         self.interrupt_channels != 0
     }
 
+    /// HD63450のチェイン転送に次のディスクリプタが必要かを返す。
     pub(crate) fn chain_descriptor_request(&self, channel: usize) -> Option<(u32, bool)> {
         let channel = self.channels.get(channel)?;
         if channel.csr & 8 == 0 || channel.ocr & 8 == 0 || channel.mtc != 0 {
@@ -257,6 +264,7 @@ impl Dma {
         Some((channel.bar, link))
     }
 
+    /// 入力データを検証して読み込み、対応する実行状態へ反映する。
     pub(crate) fn load_chain_descriptor(
         &mut self,
         channel: usize,
@@ -279,6 +287,7 @@ impl Dma {
         }
     }
 
+    /// 不正なDMAチェインをエラー終了させ、チャネル状態を更新する。
     pub(crate) fn chain_failed(&mut self, channel: usize) {
         let state = &mut self.channels[channel];
         state.cer = 0x0f;
@@ -287,6 +296,7 @@ impl Dma {
         self.raise(channel);
     }
 
+    /// 割り込み状態を更新し、CPUと周辺機器のハンドシェイクを進める。
     pub(crate) fn acknowledge(&mut self) -> Option<u8> {
         for delta in 0..4 {
             let index = (usize::from(self.last_interrupt) + delta) & 3;
@@ -304,6 +314,7 @@ impl Dma {
         None
     }
 
+    /// 指定したMFP割り込み源を有効化状態に従って保留キューへ追加する。
     fn raise(&mut self, channel: usize) {
         if self.channels[channel].ccr & 8 != 0 {
             self.interrupt_channels |= 1 << channel;
@@ -311,10 +322,12 @@ impl Dma {
     }
 }
 
+/// 入力値を `byte_of` に対応する内部表現へ変換して返す。
 fn byte_of(value: u32, byte: usize) -> u8 {
     value.to_be_bytes()[byte]
 }
 
+/// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
 fn set_address(target: &mut u32, byte: usize, value: u8, mask: u32) {
     let mut bytes = target.to_be_bytes();
     bytes[byte] = value;
@@ -326,6 +339,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `starts_advances_and_completes_a_transfer` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn starts_advances_and_completes_a_transfer() {
         let mut dma = Dma::default();
         dma.write(0x06, 4);
@@ -340,6 +354,7 @@ mod tests {
     }
 
     #[test]
+    /// `x68030_dma_preserves_full_32_bit_addresses` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn x68030_dma_preserves_full_32_bit_addresses() {
         let mut dma = Dma::new(MachineModel::X68030);
         for (offset, value) in [0x12, 0x34, 0x56, 0x78].into_iter().enumerate() {

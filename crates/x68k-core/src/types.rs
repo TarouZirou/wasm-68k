@@ -15,6 +15,7 @@ pub enum MachineModel {
 }
 
 impl MachineModel {
+    /// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
     pub const fn clock_hz(self) -> u32 {
         match self {
             Self::X68000 => 10_000_000,
@@ -23,6 +24,7 @@ impl MachineModel {
         }
     }
 
+    /// 現在の状態または入力から `name` に対応する値を算出し、副作用なく返す。
     pub const fn name(self) -> &'static str {
         match self {
             Self::X68000 => "X68000",
@@ -42,6 +44,7 @@ pub struct MachineConfig {
 }
 
 impl Default for MachineConfig {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             model: MachineModel::X68000,
@@ -96,6 +99,7 @@ pub struct VideoOptions {
 }
 
 impl Default for VideoOptions {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             crt_enabled: false,

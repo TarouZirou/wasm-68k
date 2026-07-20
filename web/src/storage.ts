@@ -7,6 +7,7 @@ export class BrowserBinaryStore {
     private readonly storeName: string,
   ) {}
 
+  /** バイナリ値をIndexedDBの指定キーへ永続化する。 */
   async put(key: string, value: Uint8Array): Promise<void> {
     const database = await this.open();
     try {
@@ -21,6 +22,7 @@ export class BrowserBinaryStore {
     }
   }
 
+  /** 指定キーのバイナリ値をIndexedDBから読み取り、未保存ならundefinedを返す。 */
   async get(key: string): Promise<Uint8Array | undefined> {
     const database = await this.open();
     try {
@@ -34,6 +36,7 @@ export class BrowserBinaryStore {
     }
   }
 
+  /** 指定キーの保存値をIndexedDBから削除する。 */
   async delete(key: string): Promise<void> {
     const database = await this.open();
     try {
@@ -57,6 +60,7 @@ export class BrowserBinaryStore {
     return write;
   }
 
+  /** アプリ用IndexedDBを開き、必要ならオブジェクトストアを作成する。 */
   private open(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(this.databaseName, 1);

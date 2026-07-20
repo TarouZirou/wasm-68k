@@ -55,12 +55,14 @@ mod tests {
     }
 
     #[test]
+    /// `pack_black_and_white` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn pack_black_and_white() {
         assert_eq!(rgb_to_grbi(0, 0, 0), 0x0000);
         assert_eq!(rgb_to_grbi(255, 255, 255), 0xfffe);
     }
 
     #[test]
+    /// `pack_primary_colors` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn pack_primary_colors() {
         assert_eq!(rgb_to_grbi(255, 0, 0), 0x07c0); // 赤
         assert_eq!(rgb_to_grbi(0, 255, 0), 0xf800); // 緑
@@ -68,6 +70,7 @@ mod tests {
     }
 
     #[test]
+    /// `roundtrip` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn roundtrip() {
         let packed = rgb_to_grbi(255, 128, 0);
         let (r, g, b) = grbi_to_rgb(packed);
@@ -79,11 +82,13 @@ mod tests {
     }
 
     #[test]
+    /// `half_blend_preserves_channel_order` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn half_blend_preserves_channel_order() {
         assert_eq!(blend_half(0x07c0, 0x003e), rgb_to_grbi(125, 0, 125));
     }
 
     #[test]
+    /// `shared_grbi_vectors_match_rust_conversion` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn shared_grbi_vectors_match_rust_conversion() {
         let vectors: Vec<Vector> =
             serde_json::from_str(include_str!("../tests/fixtures/grbi_vectors.json")).unwrap();

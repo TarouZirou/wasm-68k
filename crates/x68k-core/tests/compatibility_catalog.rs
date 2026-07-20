@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 #[test]
+/// `every_registered_compatibility_entry_passes` が想定する振る舞いを満たし、回帰がないことを検証する。
 fn every_registered_compatibility_entry_passes() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bytes = fs::read(root.join("compatibility/catalog.json")).expect("read catalog.json");

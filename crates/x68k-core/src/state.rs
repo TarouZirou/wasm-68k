@@ -64,6 +64,7 @@ pub(crate) struct CpuSnapshot {
 }
 
 impl CpuSnapshot {
+    /// CPU・メモリ・周辺機器・媒体差分を保存状態スナップショットへ収集する。
     pub fn capture(cpu: &CpuCore) -> Self {
         Self {
             dar: cpu.dar,
@@ -135,6 +136,7 @@ impl CpuSnapshot {
         }
     }
 
+    /// 入力データを検証して読み込み、対応する実行状態へ反映する。
     pub fn restore(self, model: MachineModel) -> CpuCore {
         let mut cpu = CpuCore::new();
         cpu.set_cpu_type(match model {
@@ -206,6 +208,7 @@ impl CpuSnapshot {
     }
 }
 
+/// 現在の状態を外部で扱える形式へ変換して出力する。
 pub(crate) fn encode(
     payload: &StatePayload,
     model: MachineModel,
@@ -243,6 +246,7 @@ pub(crate) fn encode(
     Ok(state)
 }
 
+/// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
 pub(crate) fn decode(
     bytes: &[u8],
     current_model: MachineModel,
@@ -302,6 +306,7 @@ pub(crate) fn decode(
     postcard::from_bytes(&decoded).map_err(|error| MachineError::InvalidState(error.to_string()))
 }
 
+/// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
 pub(crate) fn decode_manifest(
     bytes: &[u8],
 ) -> Result<(Vec<(String, [u8; 32])>, usize), MachineError> {

@@ -57,6 +57,7 @@ const CGROM_SIZE: u32 = 0x0c_0000;
 const TVRAM_SIZE: usize = 0x08_0000;
 const SRAM_SIZE: usize = 0x4000;
 
+/// 表示無効期間用の黒いGRBiフレームバッファを指定解像度で生成する。
 fn blank_scanout() -> Vec<u16> {
     vec![0; (MAX_SCREEN_WIDTH * MAX_SCREEN_HEIGHT) as usize]
 }
@@ -92,12 +93,14 @@ pub(crate) struct Devices {
 }
 
 impl Default for Devices {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self::new(MachineModel::X68000)
     }
 }
 
 impl Devices {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     fn new(model: MachineModel) -> Self {
         let ioc = vec![0; 0x2000];
         Self {
@@ -169,6 +172,7 @@ pub(crate) struct Bus {
 }
 
 impl Bus {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     pub fn new(config: &MachineConfig, ram_bytes: usize) -> Self {
         Self {
             model: config.model,
@@ -204,6 +208,7 @@ impl Bus {
         }
     }
 
+    /// 内部状態をリセットし、関連する周辺機器を起動直後の状態へ戻す。
     pub fn reset(&mut self) {
         self.reset_overlay = true;
         self.supervisor = true;
@@ -222,14 +227,17 @@ impl Bus {
         self.fault_count = 0;
     }
 
+    /// 入力イベントを処理し、対応するエミュレータ状態と外部出力を更新する。
     pub fn release_reset_overlay(&mut self) {
         self.reset_overlay = false;
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub fn set_supervisor(&mut self, supervisor: bool) {
         self.supervisor = supervisor;
     }
 
+    /// 発生したバス例外のアドレス・方向・サイズを診断状態へ記録する。
     fn record_bus_fault(&mut self, address: u32) -> BusFault {
         let address = self.mask_address(address);
         self.first_fault_address.get_or_insert(address);
@@ -238,6 +246,7 @@ impl Bus {
         fault(address)
     }
 
+    /// 現在CPUへ通知可能な最優先割り込みレベルを返す。
     pub fn pending_irq(&mut self) -> u8 {
         self.refresh_ioc_requests();
         let mfp = if self.devices.mfp.has_interrupt() {
@@ -280,6 +289,7 @@ impl Bus {
             .max(scc)
     }
 
+    /// FDCとHDDの現在の要求線からIOC入力信号のアクティブ状態を返す。
     fn live_ioc_signal(&self) -> u8 {
         (if self.devices.fdc.interrupt_pending() {
             0x80
@@ -296,6 +306,7 @@ impl Bus {
         })
     }
 
+    /// 現在の状態を調べ、次の処理時点または利用可能な結果を返す。
     fn requests_for_signal(signal: u8, enable: u8) -> u8 {
         (if signal & 0x80 != 0 && enable & 0x04 != 0 {
             0x04
@@ -321,12 +332,15 @@ impl Bus {
         self.devices.ioc_signal = signal;
     }
 
+    /// 経過CPUクロックをデバイス固有クロックへ変換し、タイマーと転送状態を進める。
     pub fn tick(&mut self, cycles: u32) {
         self.devices.mfp.tick(cycles, self.clock_hz);
         if self.devices.rtc.tick(cycles, self.clock_hz) {
             self.devices.mfp.raise(15);
         }
-        if self.devices.audio.tick(cycles, self.clock_hz) {
+        if self.devices.audio.tick(cycles, self.clock_hz)
+            && !self.devices.mfp.gpip_rising_edge(0x08)
+        {
             self.devices.mfp.raise(12);
         }
         self.devices.midi.tick(cycles, self.clock_hz);
@@ -422,6 +436,7 @@ impl Bus {
         }
     }
 
+    /// DMAチャネルが要求を受けて1単位転送できる状態かを返す。
     fn dma_transfer_ready(&self, transfer: Transfer) -> bool {
         if transfer.source == FDC_BASE + 3 {
             return self.devices.fdc.dma_read_ready();
@@ -432,6 +447,7 @@ impl Bus {
         true
     }
 
+    /// ホスト入力を機種固有のキーボード・マウス・PPI経路へ配送する。
     pub fn input(&mut self, event: InputEvent) {
         match event {
             InputEvent::Key { scancode, pressed } => {
@@ -459,6 +475,7 @@ impl Bus {
         }
     }
 
+    /// FDDの挿入・排出変化をIOC通知用の割り込み状態へ反映する。
     pub fn notify_media_change(&mut self, drive: DriveId) {
         if let DriveId::Floppy(number) = drive {
             self.refresh_ioc_requests();
@@ -467,6 +484,7 @@ impl Bus {
         }
     }
 
+    /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
     pub fn render_frame(&self, frame: &mut [u16], width: u32, height: u32, _frame_no: u64) {
         if self.ipl.is_empty() {
             // Phase 0のテストパターンはコアから撤去済み。ROM未読込時は実機同様、
@@ -491,6 +509,7 @@ impl Bus {
         Some((self.scanout_width, self.scanout_height))
     }
 
+    /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
     fn render_scanout_line(&mut self, y: u32) {
         let width = self.scanout_width;
         let mut line = [0u16; MAX_SCREEN_WIDTH as usize];
@@ -499,6 +518,7 @@ impl Bus {
         self.scanout_frame[start..start + width as usize].copy_from_slice(&line[..width as usize]);
     }
 
+    /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
     fn render_line(&self, line: &mut [u16], width: u32, y: u32) {
         let (text_scroll_x, text_scroll_y) = self.devices.crtc.text_scroll();
         let scrolls = self.devices.crtc.graphic_scrolls();
@@ -510,6 +530,7 @@ impl Bus {
         let graphic_priority = self.devices.video.layer_priority(0);
         let text_priority = self.devices.video.layer_priority(1);
         let sprite_priority = self.devices.video.layer_priority(2);
+        let backdrop = self.devices.video.backdrop_colour();
         let mut sprite_line = [0u32; MAX_SCREEN_WIDTH as usize];
         if sprites_enabled {
             self.sprite_ram.render_scanline(
@@ -592,40 +613,50 @@ impl Bus {
                 (Some(front), Some(behind)) if half_transparency_enabled && front.3 && front.4 => {
                     color::blend_half(front.2, behind.2)
                 }
+                (Some(front), None) if half_transparency_enabled && front.3 && front.4 => {
+                    color::blend_half(front.2, backdrop)
+                }
                 (Some(front), _) => front.2,
-                (None, _) => 0,
+                (None, _) => backdrop,
             };
         }
     }
 
+    /// 経過CPUクロックに対応するPCMを音声出力キューへ生成する。
     pub fn generate_audio(&mut self, frames: usize, output: &mut Vec<f32>) {
         self.devices
             .audio
             .finish_frame(frames, self.sample_rate, output);
     }
 
+    /// 新しい映像フレームに対応する音声生成区間を開始する。
     pub fn begin_audio_frame(&mut self, cycle_budget: u32, sample_frames: usize) {
         self.devices
             .audio
             .begin_frame(cycle_budget, sample_frames, self.sample_rate);
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub fn set_audio_instruction_offset(&mut self, cycles: u32) {
         self.devices.audio.set_instruction_offset(cycles);
     }
 
+    /// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
     pub fn drain_midi(&mut self) -> Vec<u8> {
         self.devices.midi.drain()
     }
 
+    /// 現在のCRTC論理解像度を幅と高さの組で返す。
     pub fn screen_dimensions(&self) -> (u32, u32) {
         self.devices.crtc.dimensions()
     }
 
+    /// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
     pub fn take_wait_cycles(&mut self) -> u32 {
         std::mem::take(&mut self.accumulated_wait)
     }
 
+    /// `fault_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn fault_diagnostics(&self) -> (Option<u32>, Option<u32>, u64) {
         (
             self.first_fault_address,
@@ -634,22 +665,27 @@ impl Bus {
         )
     }
 
+    /// `fdc_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn fdc_diagnostics(&self) -> (u64, u64, u8, u8, usize) {
         self.devices.fdc.diagnostics()
     }
 
+    /// `audio_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn audio_diagnostics(&self) -> (u64, u64, u8, u16) {
         self.devices.audio.diagnostics()
     }
 
+    /// 現在の状態または入力から `fdc_result_status` に対応する値を算出し、副作用なく返す。
     pub fn fdc_result_status(&self) -> [u8; 3] {
         self.devices.fdc.result_status()
     }
 
+    /// 現在の状態または入力から `fdc_command_parameters` に対応する値を算出し、副作用なく返す。
     pub fn fdc_command_parameters(&self) -> [u8; 8] {
         self.devices.fdc.command_parameters()
     }
 
+    /// `dma_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn dma_diagnostics(&self, channel: usize) -> (u8, u8, u8, u8, u16, u32, u32) {
         let base = (channel.min(3) as u32) << 6;
         let read_u16 = |high: u32, low: u32| {
@@ -674,16 +710,24 @@ impl Bus {
         )
     }
 
+    /// `ram_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn ram_diagnostics(&self, address: u32, length: usize) -> Vec<u8> {
         let start = address as usize;
         let end = start.saturating_add(length.min(4096)).min(self.ram.len());
         self.ram.get(start..end).unwrap_or_default().to_vec()
     }
 
+    /// `sprite_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn sprite_diagnostics(&self) -> Vec<(u8, u16, u16, u16, u8)> {
         self.sprite_ram.diagnostics()
     }
 
+    /// `mouse_buttons_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
+    pub fn mouse_buttons_diagnostics(&self) -> u8 {
+        self.devices.scc.mouse_buttons()
+    }
+
+    /// `ioc_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn ioc_diagnostics(&self) -> (u8, u8, u8, u8, u32, u64, u64) {
         let vector = self.devices.ioc[3];
         let offset = usize::from(vector) * 4;
@@ -704,14 +748,23 @@ impl Bus {
         )
     }
 
+    /// 現在の状態を調べ、次の処理時点または利用可能な結果を返す。
     pub fn cycles_until_next_event(&self) -> u32 {
-        if self.devices.mfp.needs_scanline_boundaries() {
+        let display = if self.devices.mfp.needs_scanline_boundaries() {
             self.scheduler.cycles_until_next_event()
         } else {
-            4096
-        }
+            u32::MAX
+        };
+        display
+            .min(
+                self.devices
+                    .mfp
+                    .cycles_until_next_timer_event(self.clock_hz),
+            )
+            .min(4096)
     }
 
+    /// `execute_dma_transfer` の条件が現在成立しているかを、副作用なく判定して返す。
     fn execute_dma_transfer(&mut self, transfer: Transfer) -> bool {
         match transfer.width {
             TransferWidth::Byte => self
@@ -727,6 +780,7 @@ impl Bus {
         .is_ok()
     }
 
+    /// HD63450チェインディスクリプタを読み、次の転送アドレスと長さを設定する。
     fn service_dma_chain(&mut self, channel: usize) {
         let Some((address, link)) = self.devices.dma.chain_descriptor_request(channel) else {
             return;
@@ -754,6 +808,7 @@ impl Bus {
         }
     }
 
+    /// `content_hashes` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn content_hashes(&self) -> Vec<(String, [u8; 32])> {
         let mut hashes = Vec::new();
         for (name, bytes) in [
@@ -775,6 +830,7 @@ impl Bus {
         hashes
     }
 
+    /// 保存状態へ不変データを再接続し、ハッシュ一致を検証する。
     pub fn reattach_immutable(&mut self, current: &Self) -> bool {
         if self.model != current.model || self.media.len() != current.media.len() {
             return false;
@@ -793,6 +849,7 @@ impl Bus {
         true
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_mapped(&mut self, address: u32) -> Option<u8> {
         let address = self.mask_address(address);
         self.record_memory_wait(address);
@@ -865,6 +922,7 @@ impl Bus {
         self.read_io(address)
     }
 
+    /// `write_mapped` の条件が現在成立しているかを、副作用なく判定して返す。
     fn write_mapped(&mut self, address: u32, value: u8) -> bool {
         let address = self.mask_address(address);
         self.record_memory_wait(address);
@@ -914,6 +972,7 @@ impl Bus {
         self.write_io(address, value)
     }
 
+    /// CPU型に応じて24bitまたは32bitの物理アドレスへマスクする。
     fn mask_address(&self, address: u32) -> u32 {
         match self.model {
             // M68EC030のレジスタ／拡張空間は32-bitのまま保持する一方、
@@ -925,6 +984,37 @@ impl Bus {
         }
     }
 
+    #[inline]
+    /// アドレスが高速直接RAM経路を安全に利用できる場合の添字を返す。
+    fn direct_ram_index(&self, address: u32, size: usize, read: bool) -> Option<usize> {
+        // CPUのword/longアクセスでbyte単位のmap判定を繰り返さないためのRAM専用
+        // fast path。supervisor保護と起動vector overlayに触れる場合は通常経路へ戻す。
+        let address = self.mask_address(address);
+        if !self.supervisor && address < self.supervisor_limit {
+            return None;
+        }
+        if read && self.reset_overlay && address < 8 && !self.ipl.is_empty() {
+            return None;
+        }
+        let start = usize::try_from(address).ok()?;
+        start
+            .checked_add(size)
+            .filter(|&end| end <= self.ram.len())
+            .map(|_| start)
+    }
+
+    #[inline]
+    /// 直接RAMアクセスで省略したバスウェイトをまとめてCPUへ反映する。
+    fn record_ram_waits(&mut self, address: u32, size: usize) {
+        // 68030だけは高速経路でもbyte laneごとのwaitを通常経路と同数だけ加える。
+        if self.model == MachineModel::X68030 {
+            for offset in 0..size {
+                self.record_memory_wait(address.wrapping_add(offset as u32));
+            }
+        }
+    }
+
+    /// 機種別メモリマップからSCSI ROMのベースアドレスを返す。
     fn scsi_rom_base(&self) -> u32 {
         // 8 KiB expansion ROMs are decoded at $EA0000 on X68000/XVI. The
         // X68030's internal 8 KiB ROM and all 128 KiB images use $FC0000.
@@ -935,6 +1025,7 @@ impl Bus {
         }
     }
 
+    /// メモリアクセスのウェイトクロックをCPU実行時間へ加算する。
     fn record_memory_wait(&mut self, address: u32) {
         if self.model != MachineModel::X68030 {
             return;
@@ -963,6 +1054,7 @@ impl Bus {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_io(&mut self, address: u32) -> Option<u8> {
         if let Some((offset, spc)) = self.hdc_register_offset(address) {
             return Some(if spc {
@@ -989,14 +1081,14 @@ impl Bus {
             }
             AREA_BASE..=0xe8_7fff => return Some(0xff),
             MFP_BASE..=0xe8_9fff => {
-                return Some(
-                    self.devices.mfp.read(
-                        address - MFP_BASE,
-                        self.devices
-                            .crtc
-                            .gpip(self.scheduler.horizontal_sync_high()),
-                    ),
-                );
+                let mut gpip = self
+                    .devices
+                    .crtc
+                    .gpip(self.scheduler.horizontal_sync_high());
+                if self.devices.audio.ym_irq_asserted() {
+                    gpip &= !0x08;
+                }
+                return Some(self.devices.mfp.read(address - MFP_BASE, gpip));
             }
             RTC_BASE..=0xe8_bfff => {
                 return Some(self.devices.rtc.read(address - RTC_BASE));
@@ -1045,9 +1137,17 @@ impl Bus {
         }
     }
 
+    /// `write_io` の条件が現在成立しているかを、副作用なく判定して返す。
     fn write_io(&mut self, address: u32, value: u8) -> bool {
         if (YM_BASE..=YM_BASE + 0x1fff).contains(&address) {
+            let irq_was_asserted = self.devices.audio.ym_irq_asserted();
             self.devices.audio.write_ym(address - YM_BASE, value);
+            if irq_was_asserted
+                && !self.devices.audio.ym_irq_asserted()
+                && self.devices.mfp.gpip_rising_edge(0x08)
+            {
+                self.devices.mfp.raise(12);
+            }
             return true;
         }
         if (ADPCM_BASE..=ADPCM_BASE + 0x1fff).contains(&address) {
@@ -1167,11 +1267,13 @@ impl Bus {
         }
     }
 
+    /// IOCの割り込み許可と接続デバイスの要求線からステータスレジスタ値を合成する。
     fn ioc_status(&self) -> u8 {
         // bit 5はプリンタreadyとして常時1。low nibbleは割り込みenable。
         self.live_ioc_signal() | 0x20 | (self.devices.ioc[1] & 0x0f)
     }
 
+    /// CPUアドレスをSASIまたはSCSIコントローラのレジスタ番号へ変換する。
     fn hdc_register_offset(&self, address: u32) -> Option<(u32, bool)> {
         let raw = address.checked_sub(HDC_BASE)?;
         match self.model {
@@ -1190,28 +1292,45 @@ impl Bus {
         }
     }
 
+    /// `is_disconnected_legacy_hdc` の条件が現在成立しているかを、副作用なく判定して返す。
     fn is_disconnected_legacy_hdc(&self, address: u32) -> bool {
         self.model != MachineModel::X68000 && (HDC_BASE..HDC_BASE + 0x20).contains(&address)
     }
 }
 
 impl AddressBus for Bus {
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     fn set_supervisor_mode(&mut self, supervisor: bool) {
         self.supervisor = supervisor;
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_byte(&mut self, address: u32) -> u8 {
         self.read_mapped(address).unwrap_or(0xff)
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_word(&mut self, address: u32) -> u16 {
+        if let Some(index) = self.direct_ram_index(address, 2, true) {
+            self.record_ram_waits(address, 2);
+            return u16::from_be_bytes([self.ram[index], self.ram[index + 1]]);
+        }
         u16::from_be_bytes([
             self.read_byte(address),
             self.read_byte(address.wrapping_add(1)),
         ])
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_long(&mut self, address: u32) -> u32 {
+        if let Some(index) = self.direct_ram_index(address, 4, true) {
+            self.record_ram_waits(address, 4);
+            return u32::from_be_bytes(
+                self.ram[index..index + 4]
+                    .try_into()
+                    .expect("four-byte direct RAM window"),
+            );
+        }
         u32::from_be_bytes([
             self.read_byte(address),
             self.read_byte(address.wrapping_add(1)),
@@ -1220,22 +1339,36 @@ impl AddressBus for Bus {
         ])
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_byte(&mut self, address: u32, value: u8) {
         self.write_mapped(address, value);
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_word(&mut self, address: u32, value: u16) {
+        if let Some(index) = self.direct_ram_index(address, 2, false) {
+            self.record_ram_waits(address, 2);
+            self.ram[index..index + 2].copy_from_slice(&value.to_be_bytes());
+            return;
+        }
         let [a, b] = value.to_be_bytes();
         self.write_byte(address, a);
         self.write_byte(address.wrapping_add(1), b);
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_long(&mut self, address: u32, value: u32) {
+        if let Some(index) = self.direct_ram_index(address, 4, false) {
+            self.record_ram_waits(address, 4);
+            self.ram[index..index + 4].copy_from_slice(&value.to_be_bytes());
+            return;
+        }
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write_byte(address.wrapping_add(offset as u32), byte);
         }
     }
 
+    /// 例外化せずバスを読み、成功値または詳細なバス障害を返す。
     fn try_read_byte(&mut self, address: u32) -> Result<u8, BusFault> {
         match self.read_mapped(address) {
             Some(value) => Ok(value),
@@ -1243,14 +1376,28 @@ impl AddressBus for Bus {
         }
     }
 
+    /// 例外化せずバスを読み、成功値または詳細なバス障害を返す。
     fn try_read_word(&mut self, address: u32) -> Result<u16, BusFault> {
+        if let Some(index) = self.direct_ram_index(address, 2, true) {
+            self.record_ram_waits(address, 2);
+            return Ok(u16::from_be_bytes([self.ram[index], self.ram[index + 1]]));
+        }
         Ok(u16::from_be_bytes([
             self.try_read_byte(address)?,
             self.try_read_byte(address.wrapping_add(1))?,
         ]))
     }
 
+    /// 例外化せずバスを読み、成功値または詳細なバス障害を返す。
     fn try_read_long(&mut self, address: u32) -> Result<u32, BusFault> {
+        if let Some(index) = self.direct_ram_index(address, 4, true) {
+            self.record_ram_waits(address, 4);
+            return Ok(u32::from_be_bytes(
+                self.ram[index..index + 4]
+                    .try_into()
+                    .expect("four-byte direct RAM window"),
+            ));
+        }
         Ok(u32::from_be_bytes([
             self.try_read_byte(address)?,
             self.try_read_byte(address.wrapping_add(1))?,
@@ -1259,6 +1406,7 @@ impl AddressBus for Bus {
         ]))
     }
 
+    /// 例外化せずバスへ書き、失敗時は詳細なバス障害を返す。
     fn try_write_byte(&mut self, address: u32, value: u8) -> Result<(), BusFault> {
         if self.write_mapped(address, value) {
             Ok(())
@@ -1267,19 +1415,32 @@ impl AddressBus for Bus {
         }
     }
 
+    /// 例外化せずバスへ書き、失敗時は詳細なバス障害を返す。
     fn try_write_word(&mut self, address: u32, value: u16) -> Result<(), BusFault> {
+        if let Some(index) = self.direct_ram_index(address, 2, false) {
+            self.record_ram_waits(address, 2);
+            self.ram[index..index + 2].copy_from_slice(&value.to_be_bytes());
+            return Ok(());
+        }
         let [high, low] = value.to_be_bytes();
         self.try_write_byte(address, high)?;
         self.try_write_byte(address.wrapping_add(1), low)
     }
 
+    /// 例外化せずバスへ書き、失敗時は詳細なバス障害を返す。
     fn try_write_long(&mut self, address: u32, value: u32) -> Result<(), BusFault> {
+        if let Some(index) = self.direct_ram_index(address, 4, false) {
+            self.record_ram_waits(address, 4);
+            self.ram[index..index + 4].copy_from_slice(&value.to_be_bytes());
+            return Ok(());
+        }
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.try_write_byte(address.wrapping_add(offset as u32), byte)?;
         }
         Ok(())
     }
 
+    /// CPUの割り込み応答を最優先デバイスへ配送し、返されたベクタ番号を返す。
     fn interrupt_acknowledge(&mut self, level: u8) -> u32 {
         if level == 6
             && let Some(vector) = self.devices.mfp.acknowledge()
@@ -1329,11 +1490,18 @@ impl AddressBus for Bus {
         }
     }
 
+    /// 内部状態をリセットし、関連する周辺機器を起動直後の状態へ戻す。
     fn reset_devices(&mut self) {
+        // 68000のRESET命令は外部deviceへreset信号を出すだけで、CPUのreset
+        // vector fetchを再実行しない。起動時だけのIPL overlayまで戻すと、以後
+        // RAM $000000/$000004が常に初期SSP/PCとして読めてしまう。
+        let reset_overlay = self.reset_overlay;
         self.reset();
+        self.reset_overlay = reset_overlay;
     }
 }
 
+/// アドレス・方向・アクセス幅からCPUへ返すバス障害情報を構築する。
 fn fault(address: u32) -> BusFault {
     BusFault {
         kind: BusFaultKind::BusError,
@@ -1341,12 +1509,14 @@ fn fault(address: u32) -> BusFault {
     }
 }
 
+/// 指定アドレス範囲がバッファ内なら境界検証済みのRangeを返す。
 fn get_range(bytes: &[u8], base: u32, address: u32) -> Option<u8> {
     address
         .checked_sub(base)
         .and_then(|offset| bytes.get(offset as usize).copied())
 }
 
+/// `set_range` の条件が現在成立しているかを、副作用なく判定して返す。
 fn set_range(bytes: &mut [u8], base: u32, address: u32, value: u8) -> bool {
     let Some(offset) = address.checked_sub(base) else {
         return false;
@@ -1363,14 +1533,17 @@ mod tests {
     use super::*;
     use m68k::{CpuCore, CpuType, StepResult};
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_word(bus: &mut Bus, address: u32, value: u16) {
         bus.ram[address as usize..address as usize + 2].copy_from_slice(&value.to_be_bytes());
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_long(bus: &mut Bus, address: u32, value: u32) {
         bus.ram[address as usize..address as usize + 4].copy_from_slice(&value.to_be_bytes());
     }
 
+    /// CPUが通知したバス例外を機種のバス障害診断へ記録する。
     fn exception_bus() -> Bus {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         write_long(&mut bus, 0, 0x0008_0000);
@@ -1387,6 +1560,7 @@ mod tests {
     }
 
     #[test]
+    /// `model_masks_addresses` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn model_masks_addresses() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         bus.write_byte(0x0100_0020, 0x55);
@@ -1399,12 +1573,14 @@ mod tests {
     }
 
     #[test]
+    /// `fresh_sram_uses_initialized_reserved_bytes` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn fresh_sram_uses_initialized_reserved_bytes() {
         let bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         assert!(bus.sram.iter().all(|&byte| byte == 0));
     }
 
     #[test]
+    /// `sram_ram_size_word_reports_installed_memory` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn sram_ram_size_word_reports_installed_memory() {
         let mut bus = Bus::new(&MachineConfig::default(), 4 * 1024 * 1024);
         assert_eq!(bus.read_word(SRAM_BASE + 8), 0x0040);
@@ -1413,6 +1589,7 @@ mod tests {
     }
 
     #[test]
+    /// `missing_cgrom_is_mapped_as_blank_font_instead_of_bus_error` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn missing_cgrom_is_mapped_as_blank_font_instead_of_bus_error() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         assert_eq!(bus.try_read_byte(CGROM_BASE).unwrap(), 0);
@@ -1424,6 +1601,7 @@ mod tests {
     }
 
     #[test]
+    /// `mfp_gpip_exposes_horizontal_sync_edges` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn mfp_gpip_exposes_horizontal_sync_edges() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         assert_ne!(bus.read_io(MFP_BASE + 1).unwrap() & 0x80, 0);
@@ -1446,6 +1624,33 @@ mod tests {
     }
 
     #[test]
+    /// `opm_irq_drives_active_low_gpip3_and_mfp_edge` が想定する振る舞いを満たし、回帰がないことを検証する。
+    fn opm_irq_drives_active_low_gpip3_and_mfp_edge() {
+        let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
+        assert_ne!(bus.read_io(MFP_BASE + 1).unwrap() & 0x08, 0);
+
+        let mut write_ym = |register: u8, value: u8| {
+            assert!(bus.write_io(YM_BASE + 1, register));
+            assert!(bus.write_io(YM_BASE + 3, value));
+        };
+        write_ym(0x10, 0xff);
+        write_ym(0x11, 3); // Timer A: 64 OPM clocks
+        write_ym(0x14, 0x05); // load + Timer A IRQ enable
+        bus.tick(160); // 10 MHz CPU / 4 MHz OPM
+
+        assert_eq!(bus.read_io(MFP_BASE + 1).unwrap() & 0x08, 0);
+        assert!(bus.devices.mfp.has_interrupt());
+
+        bus.devices.mfp.write(0x03, 0x0e); // AER GPIP3 rising
+        bus.devices.mfp.write(0x0d, 0); // IPRB clear
+        assert!(bus.write_io(YM_BASE + 1, 0x14));
+        assert!(bus.write_io(YM_BASE + 3, 0x15)); // status clear, timer remains loaded
+        assert_ne!(bus.read_io(MFP_BASE + 1).unwrap() & 0x08, 0);
+        assert!(bus.devices.mfp.has_interrupt());
+    }
+
+    #[test]
+    /// `vertical_display_interrupt_respects_the_mfp_active_edge` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn vertical_display_interrupt_respects_the_mfp_active_edge() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         bus.devices.mfp.write(0x07, 0); // IERA: HSync/raster/timerを無効化
@@ -1476,6 +1681,7 @@ mod tests {
     }
 
     #[test]
+    /// `scanout_latches_each_line_before_raster_sprite_updates` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn scanout_latches_each_line_before_raster_sprite_updates() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         bus.devices.video.write(0x601, 0x40); // sprite/BG layer enable
@@ -1509,6 +1715,7 @@ mod tests {
     }
 
     #[test]
+    /// `printer_write_only_data_and_strobe_ports_are_mapped` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn printer_write_only_data_and_strobe_ports_are_mapped() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         assert!(bus.try_write_byte(PRINTER_BASE + 1, 0xa5).is_ok());
@@ -1518,6 +1725,7 @@ mod tests {
     }
 
     #[test]
+    /// `area_set_blocks_user_mode_below_configured_boundary` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn area_set_blocks_user_mode_below_configured_boundary() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         assert!(bus.write_io(AREA_BASE + 1, 2));
@@ -1538,6 +1746,7 @@ mod tests {
     }
 
     #[test]
+    /// `reset_vectors_come_from_ipl_tail` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn reset_vectors_come_from_ipl_tail() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         bus.ipl = vec![0; 0x20_000];
@@ -1545,9 +1754,18 @@ mod tests {
         assert_eq!(bus.read_byte(0), 0x12);
         bus.release_reset_overlay();
         assert_eq!(bus.read_byte(0), 0);
+
+        bus.write_long(0, 0x1234_5678);
+        AddressBus::reset_devices(&mut bus);
+        assert_eq!(
+            bus.read_long(0),
+            0x1234_5678,
+            "guest RESET must not re-enable the boot vector overlay"
+        );
     }
 
     #[test]
+    /// `writes_to_rom_windows_are_acknowledged_and_ignored` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn writes_to_rom_windows_are_acknowledged_and_ignored() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         bus.ipl = vec![0xa5; 0x20_000];
@@ -1559,6 +1777,7 @@ mod tests {
     }
 
     #[test]
+    /// `xvi_and_x68030_have_a_blank_internal_scsi_rom_window_when_unloaded` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn xvi_and_x68030_have_a_blank_internal_scsi_rom_window_when_unloaded() {
         for model in [MachineModel::X68000Xvi, MachineModel::X68030] {
             let mut config = MachineConfig::default();
@@ -1570,6 +1789,7 @@ mod tests {
     }
 
     #[test]
+    /// `eight_kib_scsi_rom_does_not_shadow_midi_on_x68030` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn eight_kib_scsi_rom_does_not_shadow_midi_on_x68030() {
         let mut x68030 = MachineConfig::default();
         x68030.model = MachineModel::X68030;
@@ -1589,6 +1809,7 @@ mod tests {
     }
 
     #[test]
+    /// `odd_word_access_takes_68000_address_error` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn odd_word_access_takes_68000_address_error() {
         let mut bus = exception_bus();
         // move.w $000001.l,d0
@@ -1603,6 +1824,7 @@ mod tests {
     }
 
     #[test]
+    /// `unmapped_access_takes_68000_bus_error` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn unmapped_access_takes_68000_bus_error() {
         let mut bus = exception_bus();
         // move.b $00a00000.l,d0
@@ -1617,6 +1839,7 @@ mod tests {
     }
 
     #[test]
+    /// `interrupt_mask_and_device_vector_are_honoured` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn interrupt_mask_and_device_vector_are_honoured() {
         let mut bus = exception_bus();
         write_long(&mut bus, 0x40 * 4, 0x0000_0440);
@@ -1642,6 +1865,7 @@ mod tests {
     }
 
     #[test]
+    /// `accepted_interrupt_wakes_single_step_cpu_from_stop` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn accepted_interrupt_wakes_single_step_cpu_from_stop() {
         let mut bus = exception_bus();
         write_long(&mut bus, 0x40 * 4, 0x0000_0440);
@@ -1665,6 +1889,7 @@ mod tests {
     }
 
     #[test]
+    /// `dma_moves_bytes_through_the_machine_bus` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn dma_moves_bytes_through_the_machine_bus() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         bus.ram[0x100..0x104].copy_from_slice(&[1, 2, 3, 4]);
@@ -1684,6 +1909,7 @@ mod tests {
     }
 
     #[test]
+    /// `dma_array_chain_loads_descriptors_from_guest_ram` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn dma_array_chain_loads_descriptors_from_guest_ram() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         bus.ram[0x200] = 0x31;
@@ -1709,6 +1935,7 @@ mod tests {
     }
 
     #[test]
+    /// `fdc_data_phase_transfers_through_hd63450_dma` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn fdc_data_phase_transfers_through_hd63450_dma() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         let mut disk = vec![0; 77 * 2 * 8 * 1024];
@@ -1747,6 +1974,7 @@ mod tests {
     }
 
     #[test]
+    /// `ioc_reports_and_vectors_fdc_and_hdd_interrupts` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ioc_reports_and_vectors_fdc_and_hdd_interrupts() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
         assert!(bus.write_io(IOC_BASE + 1, 0x04));
@@ -1800,6 +2028,7 @@ mod tests {
     }
 
     #[test]
+    /// `hdc_register_window_matches_sasi_and_internal_scsi_models` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn hdc_register_window_matches_sasi_and_internal_scsi_models() {
         let mut original = Bus::new(&MachineConfig::default(), 1024 * 1024);
         assert!(original.read_io(HDC_BASE + 1).is_some());

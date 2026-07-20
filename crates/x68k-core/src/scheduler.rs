@@ -21,6 +21,7 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     pub(crate) fn new(clock_hz: u32) -> Self {
         let mut scheduler = Self {
             now: 0,
@@ -34,10 +35,12 @@ impl Scheduler {
         scheduler
     }
 
+    /// 内部状態をリセットし、関連する周辺機器を起動直後の状態へ戻す。
     pub(crate) fn reset(&mut self) {
         *self = Self::new(self.clock_hz);
     }
 
+    /// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
     pub(crate) fn advance(&mut self, cycles: u32) -> Vec<Event> {
         self.now = self.now.saturating_add(u64::from(cycles));
         let mut due = Vec::new();
@@ -76,6 +79,7 @@ impl Scheduler {
             .is_none_or(|event| *event == Event::HorizontalSync)
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub(crate) fn set_video_timing(&mut self, lines: u16, high_resolution: bool) {
         let lines = lines.max(1);
         if self.lines_per_frame != lines || self.high_resolution != high_resolution {
@@ -89,6 +93,7 @@ impl Scheduler {
         }
     }
 
+    /// 現在走査線の表示開始・ラスタ・同期イベントをスケジューラへ登録する。
     fn schedule_line_events(&mut self, from: u64) {
         // 映像発振器はCPUクロックと独立している。10MHz機換算の1フレーム
         // 周期を機種別CPUクロックへ有理数で換算し、端数を累積する。
@@ -124,6 +129,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `preserves_fractional_scanline_cycles_without_drift` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn preserves_fractional_scanline_cycles_without_drift() {
         let mut scheduler = Scheduler::new(10_000_000);
         assert_eq!(scheduler.advance(250), vec![Event::HorizontalSync]);
@@ -142,6 +148,7 @@ mod tests {
     }
 
     #[test]
+    /// `a_large_slice_delivers_every_due_event` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn a_large_slice_delivers_every_due_event() {
         let mut scheduler = Scheduler::new(10_000_000);
         let events = scheduler.advance(162_707);
@@ -156,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    /// `exposes_exact_next_event_boundary` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn exposes_exact_next_event_boundary() {
         let mut scheduler = Scheduler::new(10_000_000);
         assert_eq!(scheduler.cycles_until_next_event(), 250);
@@ -168,6 +176,7 @@ mod tests {
     }
 
     #[test]
+    /// `high_resolution_and_machine_clock_scale_without_drift` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn high_resolution_and_machine_clock_scale_without_drift() {
         let mut scheduler = Scheduler::new(25_000_000);
         scheduler.set_video_timing(568, true);

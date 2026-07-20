@@ -15,9 +15,13 @@ type LoadTarget = RomTarget | `fdd${0 | 1 | 2 | 3}` | "hdd0" | "state";
 // wasm-pack生成物がエディタ上で一世代古くても、Rust側の安定公開APIを型として
 // 保持する。実体の存在はPages E2Eで検証する。
 type Emulator = WebX68k & {
+  /** 起動後に処理したエミュレーションフレーム数を返す。 */
   frame_number(): bigint;
+  /** 現在の論理解像度の横幅をピクセル単位で返す。 */
   screen_width(): number;
+  /** 現在の論理解像度の縦幅をピクセル単位で返す。 */
   screen_height(): number;
+  /** Web音声出力へ適用するマスター音量を更新する。 */
   set_volume(volume: number): void;
 };
 
@@ -25,6 +29,17 @@ let keyMap: Record<string, number> = { ...defaultKeyMap };
 const pressedKeys = new PressedKeyState();
 const pressedMouseButtons = new Set<number>();
 
+/** ブラウザのマウスボタン番号をX68000 SCCのボタン順へ変換する。 */
+function x68kMouseButton(button: number): number | undefined {
+  // Browser: left=0, middle=1, right=2. X68000 packet: left=0, right=1,
+  // middle=2. Native frontendと同じ順序へ変換してからSCCへ渡す。
+  if (button === 0) return 0;
+  if (button === 2) return 1;
+  if (button === 1) return 2;
+  return undefined;
+}
+
+/** 必須のDOM要素をIDで取得し、期待する要素型として返す。 */
 const $ = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
   if (!element) throw new Error(`required element #${id} not found`);
@@ -75,6 +90,7 @@ class MidiParser {
   private expected = 0;
   private sysex = false;
 
+  /** 入力を処理待ちキューへ追加し、後続処理で利用できるようにする。 */
   push(bytes: Uint8Array): number[][] {
     const complete: number[][] = [];
     for (const byte of bytes) {
@@ -111,6 +127,7 @@ class MidiParser {
     return complete;
   }
 
+  /** 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。 */
   private takeMessage(): number[] {
     const message = this.message;
     this.message = [];
@@ -118,6 +135,7 @@ class MidiParser {
   }
 }
 
+/** MIDIステータスバイトからメッセージ全体のバイト数を返す。 */
 function midiMessageLength(statusByte: number): number {
   if ((statusByte >= 0x80 && statusByte <= 0xbf) ||
       (statusByte >= 0xe0 && statusByte <= 0xef) || statusByte === 0xf2) return 3;
@@ -127,11 +145,13 @@ function midiMessageLength(statusByte: number): number {
 
 const midiParser = new MidiParser();
 
+/** 現在の状態や結果を利用者向けの診断情報として提示する。 */
 function message(text: string, error = false): void {
   status.textContent = text;
   status.classList.toggle("error", error);
 }
 
+/** 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。 */
 async function fetchVerifiedSharpAsset(asset: { name: string; size: number; sha256: string }): Promise<Uint8Array> {
   const response = await fetch(`${import.meta.env.BASE_URL}sharp/${asset.name}`);
   if (!response.ok) throw new Error(`${asset.name}の取得に失敗しました (${response.status})`);
@@ -145,6 +165,7 @@ async function fetchVerifiedSharpAsset(asset: { name: string; size: number; sha2
   return bytes;
 }
 
+/** 公式IPLとHuman68k媒体を取得・検証し、FDDから起動する。 */
 async function bootOfficialHuman68k(): Promise<void> {
   if (!emulatorReady) return;
   const button = $<HTMLButtonElement>("official-software");
@@ -191,6 +212,7 @@ async function bootOfficialHuman68k(): Promise<void> {
   }
 }
 
+/** 必要な構成要素を生成し、呼び出し側が利用できる形で返す。 */
 async function createEmulator(): Promise<void> {
   // Wasm surface生成のawait中に、破棄済みインスタンスをanimateが呼ばないようにする。
   emulatorReady = false;
@@ -228,6 +250,7 @@ async function createEmulator(): Promise<void> {
     : "準備完了。IPLを読み込むか、内蔵の診断IPLを起動してください。");
 }
 
+/** 論理解像度と表示領域から整数倍率を選び、1論理ピクセルを崩さず表示する。 */
 function fitCanvas(): void {
   if (!emulator || !emulatorReady) return;
   const mode = $<HTMLSelectElement>("display-size").value;
@@ -258,6 +281,7 @@ function fitCanvas(): void {
   }
 }
 
+/** 指定値を内部状態へ反映し、依存する設定や派生値も更新する。 */
 function updateVideoOptions(): void {
   emulator?.set_video_options(
     $<HTMLInputElement>("crt").checked,
@@ -267,10 +291,12 @@ function updateVideoOptions(): void {
   );
 }
 
+/** 入力を解析し、後続処理で利用できる正規化済みの結果を返す。 */
 function extension(name: string): string {
   return name.toLowerCase().split(".").pop() ?? "";
 }
 
+/** 入力データを検証して読み込み、対応する実行状態へ反映する。 */
 async function loadFile(file: File, target: LoadTarget): Promise<void> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (target === "state") {
@@ -303,12 +329,14 @@ async function loadFile(file: File, target: LoadTarget): Promise<void> {
   message(`${target.toUpperCase()}へ挿入しました: ${file.name}`);
 }
 
+/** UI上の読込先をコアAPIの媒体種別とドライブ番号へ変換する。 */
 function mediaTarget(target: LoadTarget): { kind: "floppy" | "hard-disk"; drive: number } {
   if (target === "hdd0") return { kind: "hard-disk", drive: 0 };
   if (target.startsWith("fdd")) return { kind: "floppy", drive: Number(target.at(-1)) };
   throw new Error(`${target} is not a media drive`);
 }
 
+/** 現在の状態を外部で扱える形式へ変換して出力する。 */
 function exportMounted(target: LoadTarget): void {
   const { kind, drive } = mediaTarget(target);
   const bytes = emulator.export_media(kind, drive);
@@ -317,6 +345,7 @@ function exportMounted(target: LoadTarget): void {
   message(`${target.toUpperCase()}の変更媒体を書き出しました`);
 }
 
+/** 対象を切り離し、保持していた媒体または入出力状態を更新する。 */
 function ejectMounted(target: LoadTarget): void {
   const { kind, drive } = mediaTarget(target);
   emulator.eject_media(kind, drive);
@@ -325,6 +354,7 @@ function ejectMounted(target: LoadTarget): void {
   message(`${target.toUpperCase()}を排出しました（自動書出しなし）`);
 }
 
+/** 入力を解析し、後続処理で利用できる正規化済みの結果を返す。 */
 function inferTarget(file: File): LoadTarget {
   const lower = file.name.toLowerCase();
   if (lower.includes("cgrom")) return "cgrom";
@@ -338,6 +368,7 @@ function inferTarget(file: File): LoadTarget {
   return "fdd0";
 }
 
+/** 対象機能の実行状態を切り替え、関連リソースを整合させる。 */
 async function startAudio(): Promise<void> {
   if (!audioContext) {
     audioContext = new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" });
@@ -352,10 +383,12 @@ async function startAudio(): Promise<void> {
   $<HTMLButtonElement>("audio").textContent = "音声有効";
 }
 
+/** 内部状態をリセットし、関連する周辺機器を起動直後の状態へ戻す。 */
 function resetAudioBuffer(): void {
   audioNode?.port.postMessage({ type: "reset" });
 }
 
+/** 対象機能の実行状態を切り替え、関連リソースを整合させる。 */
 async function enableMidi(): Promise<void> {
   if (!("requestMIDIAccess" in navigator)) throw new Error("Web MIDIはこのブラウザで利用できません");
   const access = await navigator.requestMIDIAccess({ sysex: false });
@@ -365,6 +398,7 @@ async function enableMidi(): Promise<void> {
   $<HTMLButtonElement>("midi").textContent = midiOutput.name ?? "MIDI有効";
 }
 
+/** 現在の状態を調べ、次の処理時点または利用可能な結果を返す。 */
 function pollGamepad(): void {
   const pads = "getGamepads" in navigator ? [...navigator.getGamepads()] : [];
   const connected = gamepadController.poll(pads, {
@@ -376,10 +410,12 @@ function pollGamepad(): void {
   $<HTMLSpanElement>("gamepad-status").textContent = connected ?? "未接続";
 }
 
+/** 入力イベントを処理し、対応するエミュレータ状態と外部出力を更新する。 */
 function releaseGamepad(): void {
   gamepadController.release(emulator);
 }
 
+/** 現在の状態を外部で扱える形式へ変換して出力する。 */
 function download(name: string, bytes: string | Uint8Array, type = "application/octet-stream"): void {
   let part: BlobPart;
   if (typeof bytes === "string") {
@@ -396,11 +432,13 @@ function download(name: string, bytes: string | Uint8Array, type = "application/
   setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 
+/** 機種とROM種別からIndexedDBで衝突しない保存キーを組み立てる。 */
 function romStorageKey(kind: RomTarget, suffix = "bytes", modelScope = activeModel): string {
   const scope = kind === "cgrom" ? "shared" : modelScope;
   return `rom:${kind}:${scope}:${suffix}`;
 }
 
+/** 利用者が選んだROMと表示名を次回起動用にブラウザ内へ保存する。 */
 async function persistRom(kind: RomTarget, name: string, bytes: Uint8Array): Promise<void> {
   await Promise.all([
     browserStore.put(romStorageKey(kind), bytes),
@@ -408,6 +446,7 @@ async function persistRom(kind: RomTarget, name: string, bytes: Uint8Array): Pro
   ]);
 }
 
+/** 入力データを検証して読み込み、対応する実行状態へ反映する。 */
 async function restoreRoms(): Promise<string[]> {
   const restored: string[] = [];
   // IPLはload時にresetするため、他のROMとSRAMを接続した後に最後に復元する。
@@ -428,6 +467,7 @@ async function restoreRoms(): Promise<string[]> {
   return restored;
 }
 
+/** 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。 */
 async function clearPersistedRoms(): Promise<void> {
   const keys = [romStorageKey("cgrom"), romStorageKey("cgrom", "name")];
   for (const profile of ["x68000", "xvi", "x68030"]) {
@@ -439,6 +479,7 @@ async function clearPersistedRoms(): Promise<void> {
   message("保存IPL/SCSI ROMと共通CGROMをすべて消去しました（現在の実行中ROMは次の機種切替まで有効です）");
 }
 
+/** 指定値を内部状態へ反映し、依存する設定や派生値も更新する。 */
 function settingsBytes(): Uint8Array {
   return new TextEncoder().encode(JSON.stringify({
     model: model.value,
@@ -455,10 +496,12 @@ function settingsBytes(): Uint8Array {
   }));
 }
 
+/** 現在の状態を外部で扱える形式へ変換して出力する。 */
 function saveSettings(): Promise<void> {
   return browserStore.putSerialized("settings", settingsBytes());
 }
 
+/** 入力データを検証して読み込み、対応する実行状態へ反映する。 */
 async function restoreSettings(): Promise<void> {
   const bytes = await browserStore.get("settings").catch(() => undefined);
   if (bytes) {
@@ -501,6 +544,7 @@ async function restoreSettings(): Promise<void> {
   $<HTMLTextAreaElement>("keymap").value = JSON.stringify(keyMap, null, 2);
 }
 
+/** 入力データを検証して読み込み、対応する実行状態へ反映する。 */
 function restoreRange(id: string, value: unknown): void {
   if (typeof value !== "string" || !Number.isFinite(Number(value))) return;
   const input = $<HTMLInputElement>(id);
@@ -508,6 +552,7 @@ function restoreRange(id: string, value: unknown): void {
   if (numeric >= Number(input.min) && numeric <= Number(input.max)) input.value = value;
 }
 
+/** ブラウザのkeydownをX68000スキャンコードへ変換して押下を通知する。 */
 function keyDown(event: KeyboardEvent): void {
   if (document.activeElement !== canvas) return;
   const scancode = pressedKeys.press(event.code, keyMap);
@@ -517,6 +562,7 @@ function keyDown(event: KeyboardEvent): void {
   emulator.set_key(scancode, true);
 }
 
+/** ブラウザのkeyupをX68000スキャンコードへ変換して解放を通知する。 */
 function keyUp(event: KeyboardEvent): void {
   const released = pressedKeys.release(event.code);
   if (released === undefined) return;
@@ -524,11 +570,13 @@ function keyUp(event: KeyboardEvent): void {
   if (released.sendBreak) emulator.set_key(released.scancode, false);
 }
 
+/** 入力イベントを処理し、対応するエミュレータ状態と外部出力を更新する。 */
 function releaseAllKeys(): void {
   const scancodes = pressedKeys.drain();
   if (emulator) for (const scancode of scancodes) emulator.set_key(scancode, false);
 }
 
+/** 入力イベントを処理し、対応するエミュレータ状態と外部出力を更新する。 */
 function releaseTransientInputs(): void {
   releaseAllKeys();
   if (emulator) {
@@ -538,6 +586,7 @@ function releaseTransientInputs(): void {
   releaseGamepad();
 }
 
+/** 関連コンポーネントを接続し、イベントやデータが伝達されるよう設定する。 */
 function wireUi(): void {
   new ResizeObserver(fitCanvas).observe($<HTMLDivElement>("screen-viewport"));
   model.addEventListener("change", () => {
@@ -609,12 +658,15 @@ function wireUi(): void {
   canvas.addEventListener("mousemove", (event) => { if (document.pointerLockElement === canvas) emulator.set_mouse_delta(event.movementX, event.movementY); });
   canvas.addEventListener("mousedown", (event) => {
     canvas.focus();
-    pressedMouseButtons.add(event.button);
-    emulator.set_mouse_button(event.button, true);
+    const button = x68kMouseButton(event.button);
+    if (button === undefined) return;
+    pressedMouseButtons.add(button);
+    emulator.set_mouse_button(button, true);
   });
   window.addEventListener("mouseup", (event) => {
-    if (!pressedMouseButtons.delete(event.button)) return;
-    emulator.set_mouse_button(event.button, false);
+    const button = x68kMouseButton(event.button);
+    if (button === undefined || !pressedMouseButtons.delete(button)) return;
+    emulator.set_mouse_button(button, false);
   });
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("dblclick", () => void canvas.requestPointerLock());
@@ -635,6 +687,7 @@ function wireUi(): void {
     fitCanvas();
     void saveSettings().catch(console.warn);
   };
+  /** 指定値を内部状態へ反映し、依存する設定や派生値も更新する。 */
   const updateGamepadSettings = () => {
     releaseGamepad();
     void saveSettings().catch(console.warn);
@@ -666,6 +719,7 @@ function wireUi(): void {
       .then(() => message("X68000既定キーマップへ戻しました"))
       .catch(showError);
   };
+  /** UIで選択中の保存状態スロット番号を返す。 */
   const stateSlot = () => $<HTMLSelectElement>("state-slot").value;
   $<HTMLButtonElement>("save-state").onclick = () => void browserStore.put(`state:${model.value}:${stateSlot()}`, emulator.save_state()).then(() => message(`保存状態スロット${stateSlot()}へ保存しました`)).catch(showError);
   $<HTMLButtonElement>("load-state").onclick = () => void browserStore.get(`state:${model.value}:${stateSlot()}`).then((state) => { if (!state) throw new Error("保存状態がありません"); resetAudioBuffer(); emulator.load_state(state); message(`保存状態スロット${stateSlot()}を復元しました`); }).catch(showError);
@@ -674,11 +728,13 @@ function wireUi(): void {
   $<HTMLButtonElement>("diagnostics").onclick = () => download("wasm-68k-diagnostics.json", emulator.diagnostics(), "application/json");
 }
 
+/** 現在の状態や結果を利用者向けの診断情報として提示する。 */
 function showError(error: unknown): void {
   console.error(error);
   message(String(error), true);
 }
 
+/** ブラウザの描画時刻に合わせてエミュレーション・映像・音声・入力を更新する。 */
 function animate(timestamp: number): void {
   if (!emulatorReady) {
     requestAnimationFrame(animate);
@@ -721,6 +777,7 @@ function animate(timestamp: number): void {
   requestAnimationFrame(animate);
 }
 
+/** アプリケーションを初期化し、実行に必要な各コンポーネントを起動する。 */
 async function main(): Promise<void> {
   await init();
   await restoreSettings();

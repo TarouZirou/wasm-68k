@@ -27,6 +27,7 @@ struct Operator {
 }
 
 impl Default for Operator {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             phase: 0,
@@ -96,11 +97,11 @@ pub(super) struct Ym2151 {
     diagnostic_register_writes: u64,
     #[serde(skip, default)]
     diagnostic_key_ons: u64,
-    #[serde(skip, default)]
     diagnostic_peak: u16,
 }
 
 impl Default for Ym2151 {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         let mut registers = vec![0; 256];
         // 実チップreset値と同様、全channelの左右出力を有効にする。
@@ -131,6 +132,7 @@ impl Default for Ym2151 {
 }
 
 impl Ym2151 {
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(super) fn write(&mut self, offset: u32, value: u8) {
         match offset & 3 {
             1 => self.address = value,
@@ -139,10 +141,21 @@ impl Ym2151 {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(super) fn read(&self, offset: u32) -> u8 {
-        if offset & 3 == 3 { self.status } else { 0 }
+        // X68000のOPMは奇数アドレスへ接続されている。実ソフトには
+        // $E90001と$E90003の双方でbusy/statusを読むものがあるため、
+        // どちらのreadも同じstatusを返す。
+        if offset & 1 == 1 { self.status } else { 0 }
     }
 
+    /// `irq_asserted` の条件が現在成立しているかを、副作用なく判定して返す。
+    pub(super) fn irq_asserted(&self) -> bool {
+        let control = self.registers[0x14];
+        self.status & ((control >> 2) & 3) != 0
+    }
+
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_register(&mut self, register: u8, value: u8) {
         self.diagnostic_register_writes = self.diagnostic_register_writes.saturating_add(1);
         let register_index = usize::from(register);
@@ -181,6 +194,7 @@ impl Ym2151 {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_key_on(&mut self, value: u8) {
         let channel_index = usize::from(value & 7);
         if channel_index >= self.channels.len() {
@@ -210,11 +224,13 @@ impl Ym2151 {
         }
     }
 
+    /// 経過CPUクロックをデバイス固有クロックへ変換し、タイマーと転送状態を進める。
     pub(super) fn tick(&mut self, cpu_cycles: u32, cpu_clock: u32) -> bool {
+        let control = self.registers[0x14];
+        let irq_was_asserted = self.irq_asserted();
         self.timer_fraction += u64::from(cpu_cycles) * u64::from(OPM_CLOCK);
         let clocks = self.timer_fraction / u64::from(cpu_clock);
         self.timer_fraction %= u64::from(cpu_clock);
-        let control = self.registers[0x14];
         if control & 1 != 0 {
             let mut elapsed = clocks;
             while elapsed >= self.timer_a_counter.max(1) {
@@ -237,18 +253,24 @@ impl Ym2151 {
             }
             self.timer_b_counter = self.timer_b_counter.saturating_sub(elapsed);
         }
-        self.status & ((control >> 2) & 3) != 0
+        let irq_is_asserted = self.irq_asserted();
+        // YM2151のIRQはMFP GPIP3へ接続されたlevel信号。MFP側へはassert時の
+        // edgeだけを渡し、status clearまで同じ割り込みを毎命令再要求しない。
+        irq_is_asserted && !irq_was_asserted
     }
 
+    /// YM2151タイマーA設定値から満了までの内部クロック数を算出する。
     fn timer_a_period(&self) -> u64 {
         let value = (u16::from(self.registers[0x10]) << 2) | u16::from(self.registers[0x11] & 3);
         u64::from(1024 - value) * 64
     }
 
+    /// YM2151タイマーB設定値から満了までの内部クロック数を算出する。
     fn timer_b_period(&self) -> u64 {
         u64::from(256 - u16::from(self.registers[0x12])) * 1024
     }
 
+    /// 指定サンプル数のFM・ADPCMステレオPCMを生成する。
     pub(super) fn generate(&mut self, frames: usize, sample_rate: u32, output: &mut Vec<f32>) {
         let parameters = self.render_parameters();
         output.reserve(frames * 2);
@@ -259,6 +281,7 @@ impl Ym2151 {
         }
     }
 
+    /// YM2151ネイティブ出力をホストのサンプルレートへ補間する。
     fn resampled_sample(&mut self, sample_rate: u32, parameters: &RenderParameters) -> [i16; 2] {
         if sample_rate == OPM_SAMPLE_RATE {
             return self.native_sample(parameters);
@@ -285,6 +308,7 @@ impl Ym2151 {
         })
     }
 
+    /// YM2151の全オペレータをネイティブレートで合成する。
     fn native_sample(&mut self, parameters: &RenderParameters) -> [i16; 2] {
         // OPMのEGはFM clock 3回につき1回。x.2 counterの欠番を飛ばす。
         self.envelope_counter = self.envelope_counter.wrapping_add(1);
@@ -347,6 +371,7 @@ impl Ym2151 {
         output
     }
 
+    /// YM2151のアルゴリズムに従いオペレータを接続して1チャンネルを合成する。
     fn output_channel(
         &mut self,
         channel_index: usize,
@@ -427,6 +452,7 @@ impl Ym2151 {
         }
     }
 
+    /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
     fn render_parameters(&self) -> RenderParameters {
         // register bank順は M1, M2, C1, C2。接続順 M1, C1, M2, C2へ直す。
         const REGISTER_SLOT: [usize; 4] = [0, 2, 1, 3];
@@ -482,6 +508,7 @@ impl Ym2151 {
         RenderParameters { channels }
     }
 
+    /// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
     fn clock_noise_and_lfo(&mut self) -> i32 {
         let noise_frequency = (self.registers[0x0f] & 0x1f) ^ 0x1f;
         for _ in 0..2 {
@@ -531,15 +558,18 @@ impl Ym2151 {
     }
 
     #[cfg(test)]
+    /// 位相カウンタへ変調を加え、サインテーブル参照位置を返す。
     pub(super) fn operator_phase(&self, channel: usize, slot: usize) -> u32 {
         self.channels[channel].operators[slot].phase
     }
 
     #[cfg(test)]
+    /// エンベロープとTLからオペレータの合成減衰量を返す。
     pub(super) fn operator_total_level(&self, channel: usize, slot: usize) -> u16 {
         self.render_parameters().channels[channel].operators[slot].total_level
     }
 
+    /// 現在の状態や結果を利用者向けの診断情報として提示する。
     pub(super) fn diagnostics(&self) -> (u64, u64, u8, u16) {
         let mut active_channels = 0u8;
         for (index, channel) in self.channels.iter().enumerate() {
@@ -560,6 +590,7 @@ impl Ym2151 {
     }
 }
 
+/// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
 fn clock_envelope(operator: &mut Operator, parameters: &OperatorParameters, envelope_counter: u32) {
     if operator.envelope_state == EG_ATTACK && operator.envelope == 0 {
         operator.envelope_state = EG_DECAY;
@@ -586,6 +617,7 @@ fn clock_envelope(operator: &mut Operator, parameters: &OperatorParameters, enve
     }
 }
 
+/// エンベロープ・TL・キースケールを合成した減衰量を返す。
 fn effective_attenuation(
     operator: &Operator,
     parameters: &OperatorParameters,
@@ -603,6 +635,7 @@ fn effective_attenuation(
         .min(0x3ff)
 }
 
+/// オペレータの位相と減衰量から現在のFM出力値を計算する。
 fn operator_output(
     operator: &Operator,
     parameters: &OperatorParameters,
@@ -626,6 +659,7 @@ fn operator_output(
     if phase & 0x200 != 0 { -volume } else { volume }
 }
 
+/// YM2151のエンベロープレートと位相から今回の減衰増分を返す。
 fn attenuation_increment(rate: usize, index: u32) -> u16 {
     const INCREMENTS: [u32; 64] = [
         0x00000000, 0x00000000, 0x10101010, 0x10101010, 0x10101010, 0x10101010, 0x11101110,
@@ -642,6 +676,7 @@ fn attenuation_increment(rate: usize, index: u32) -> u16 {
     ((INCREMENTS[rate] >> (4 * index)) & 0x0f) as u16
 }
 
+/// DT1設定とキーコードから位相増分の補正値を計算する。
 fn detune_adjustment(detune: u8, keycode: usize) -> i32 {
     const DETUNE: [[u8; 4]; 32] = [
         [0, 0, 1, 2],
@@ -685,6 +720,7 @@ fn detune_adjustment(detune: u8, keycode: usize) -> i32 {
     }
 }
 
+/// キーコード・倍率・デチューンからオペレータの位相増分を計算する。
 fn compute_phase_step(parameters: &OperatorParameters, pm_sensitivity: u8, lfo_pm: i32) -> u32 {
     const DETUNE2: [i32; 4] = [0, 384, 500, 608];
     let mut delta = DETUNE2[usize::from(parameters.detune2)];
@@ -700,6 +736,7 @@ fn compute_phase_step(parameters: &OperatorParameters, pm_sensitivity: u8, lfo_p
     detuned.saturating_mul(parameters.multiple) >> 1
 }
 
+/// キーコードと周波数分数から基準位相増分を計算する。
 fn phase_step_from_key_code(block_frequency: u32, delta: i32) -> u32 {
     let mut block = ((block_frequency >> 10) & 7) as i32;
     let code = ((block_frequency >> 6) & 0x0f) as i32;
@@ -723,6 +760,7 @@ fn phase_step_from_key_code(block_frequency: u32, delta: i32) -> u32 {
     PHASE_STEP[effective as usize] >> (block ^ 7)
 }
 
+/// 入力値を `roundtrip_fp` に対応する内部表現へ変換して返す。
 fn roundtrip_fp(value: i32) -> i16 {
     let value = value.clamp(-32768, 32767);
     let scan = value ^ (value >> 31);
@@ -735,12 +773,14 @@ fn roundtrip_fp(value: i32) -> i16 {
 mod tests {
     use super::*;
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_register(chip: &mut Ym2151, register: u8, value: u8) {
         chip.write(1, register);
         chip.write(3, value);
     }
 
     #[test]
+    /// `phase_table_uses_x68000_four_megahertz_clock` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn phase_table_uses_x68000_four_megahertz_clock() {
         let block_frequency = u32::from(0x48u8) << 6;
         let step = phase_step_from_key_code(block_frequency, 0);
@@ -749,6 +789,7 @@ mod tests {
     }
 
     #[test]
+    /// `operator_register_order_is_m1_c1_m2_c2` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn operator_register_order_is_m1_c1_m2_c2() {
         let mut chip = Ym2151::default();
         chip.registers[0x68] = 20;
@@ -758,6 +799,7 @@ mod tests {
     }
 
     #[test]
+    /// `timer_status_requires_irq_enable_and_load_edge_restarts_period` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn timer_status_requires_irq_enable_and_load_edge_restarts_period() {
         let mut chip = Ym2151::default();
         write_register(&mut chip, 0x10, 0xff);
@@ -766,12 +808,13 @@ mod tests {
         // loadだけでは満了してもstatusを立てない。
         write_register(&mut chip, 0x14, 0x01);
         assert!(!chip.tick(64, OPM_CLOCK));
-        assert_eq!(chip.read(3) & 1, 0);
+        assert_eq!(chip.read(1) & 1, 0);
 
         // loadを維持したままIRQ enableすると次の満了でstatus/IRQが立つ。
         write_register(&mut chip, 0x14, 0x05);
         assert!(!chip.tick(63, OPM_CLOCK));
         assert!(chip.tick(1, OPM_CLOCK));
+        assert_eq!(chip.read(1) & 1, 1);
         assert_eq!(chip.read(3) & 1, 1);
 
         // stopしてから再loadすると途中のcounterを再利用しない。
@@ -787,6 +830,7 @@ mod tests {
     }
 
     #[test]
+    /// `running_timer_applies_new_period_after_current_expiry` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn running_timer_applies_new_period_after_current_expiry() {
         let mut chip = Ym2151::default();
         write_register(&mut chip, 0x10, 0xff);
@@ -796,8 +840,12 @@ mod tests {
         write_register(&mut chip, 0x11, 3); // next period: 64 clocks
         assert!(!chip.tick(63, OPM_CLOCK));
         assert!(chip.tick(1, OPM_CLOCK));
+        assert!(
+            !chip.tick(1, OPM_CLOCK),
+            "asserted IRQ must not retrigger without a clear"
+        );
         write_register(&mut chip, 0x14, 0x15);
-        assert!(!chip.tick(63, OPM_CLOCK));
+        assert!(!chip.tick(62, OPM_CLOCK));
         assert!(chip.tick(1, OPM_CLOCK));
     }
 }

@@ -41,6 +41,7 @@ pub(crate) struct Fdc {
 }
 
 impl Default for Fdc {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             command: 0,
@@ -65,6 +66,7 @@ impl Default for Fdc {
 }
 
 impl Fdc {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&mut self, offset: u32, media: &BTreeMap<DriveId, MediaImage>) -> u8 {
         match offset {
             1 => self.main_status(),
@@ -79,6 +81,7 @@ impl Fdc {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(
         &mut self,
         offset: u32,
@@ -94,14 +97,17 @@ impl Fdc {
         }
     }
 
+    /// `interrupt_pending` の条件が現在成立しているかを、副作用なく判定して返す。
     pub(crate) fn interrupt_pending(&self) -> bool {
         self.irq_pending
     }
 
+    /// `media_interrupt_pending` の条件が現在成立しているかを、副作用なく判定して返す。
     pub(crate) fn media_interrupt_pending(&self) -> bool {
         self.media_irq_pending
     }
 
+    /// FDDの挿入・排出変化をIOC通知用の割り込み状態へ反映する。
     pub(crate) fn notify_media_change(&mut self, drive: u8) {
         if drive < 4 {
             self.selected_drive = Some(drive);
@@ -109,10 +115,12 @@ impl Fdc {
         }
     }
 
+    /// 割り込み状態を更新し、CPUと周辺機器のハンドシェイクを進める。
     pub(crate) fn acknowledge_media(&mut self) {
         self.media_irq_pending = false;
     }
 
+    /// 現在の状態や結果を利用者向けの診断情報として提示する。
     pub(crate) fn diagnostics(&self) -> (u64, u64, u8, u8, usize) {
         (
             self.command_count,
@@ -128,6 +136,7 @@ impl Fdc {
         self.last_result_status
     }
 
+    /// 受信中のFDCコマンド引数を診断用の固定長配列で返す。
     pub(crate) fn command_parameters(&self) -> [u8; 8] {
         std::array::from_fn(|index| self.parameters.get(index).copied().unwrap_or(0))
     }
@@ -157,6 +166,7 @@ impl Fdc {
         self.expected_write_data != 0 && self.write_data.len() < self.expected_write_data
     }
 
+    /// 現在の状態または入力から `main_status` に対応する値を算出し、副作用なく返す。
     fn main_status(&self) -> u8 {
         let busy = self.expected_parameters != 0
             || self.expected_write_data != 0
@@ -164,6 +174,7 @@ impl Fdc {
         0x80 | if !self.output.is_empty() { 0x40 } else { 0 } | if busy { 0x10 } else { 0 }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_data_register(&mut self) -> u8 {
         let reading_result = self.result_bytes_remaining != 0
             && self.output.len() <= usize::from(self.result_bytes_remaining);
@@ -183,6 +194,7 @@ impl Fdc {
         value
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_data_register(&mut self, value: u8, media: &mut BTreeMap<DriveId, MediaImage>) {
         if self.expected_write_data != 0 {
             self.write_data.push(value);
@@ -217,6 +229,7 @@ impl Fdc {
         }
     }
 
+    /// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
     fn execute(&mut self, media: &mut BTreeMap<DriveId, MediaImage>) {
         match self.command {
             3 => {}
@@ -301,6 +314,7 @@ impl Fdc {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_sector(&mut self, media: &BTreeMap<DriveId, MediaImage>) {
         let drive = self.parameter(0) & 3;
         let mut last = self.sector_id();
@@ -356,6 +370,7 @@ impl Fdc {
         );
     }
 
+    /// FDC書込みデータを媒体オーバーレイへ反映して結果フェーズへ進める。
     fn finish_sector_write(&mut self, media: &mut BTreeMap<DriveId, MediaImage>) {
         let drive = self.parameter(0) & 3;
         if self.command == 13 {
@@ -398,6 +413,7 @@ impl Fdc {
         );
     }
 
+    /// FDC FORMAT TRACKの受信データを媒体オーバーレイへ反映して結果を返す。
     fn finish_format(&mut self, media: &mut BTreeMap<DriveId, MediaImage>) {
         let drive = self.parameter(0) & 3;
         let fill = self.parameter(4);
@@ -422,6 +438,7 @@ impl Fdc {
         );
     }
 
+    /// FDC SCANの比較結果をST2へ反映し、結果フェーズへ進める。
     fn finish_scan(&mut self, media: &BTreeMap<DriveId, MediaImage>) {
         let drive = self.parameter(0) & 3;
         let size = self.sector_size();
@@ -449,11 +466,13 @@ impl Fdc {
         );
     }
 
+    /// 入力を処理待ちキューへ追加し、後続処理で利用できるようにする。
     fn queue_result(&mut self, status0: u8, status1: u8, status2: u8) {
         let id = self.sector_id();
         self.queue_result_for_id(status0, status1, status2, id);
     }
 
+    /// 入力を処理待ちキューへ追加し、後続処理で利用できるようにする。
     fn queue_result_for_id(&mut self, status0: u8, status1: u8, status2: u8, id: [u8; 4]) {
         self.last_result_status = [status0, status1, status2];
         self.output
@@ -464,10 +483,12 @@ impl Fdc {
         self.irq_pending = self.output.len() == usize::from(self.result_bytes_remaining);
     }
 
+    /// 現在の状態または入力から `parameter` に対応する値を算出し、副作用なく返す。
     fn parameter(&self, index: usize) -> u8 {
         self.parameters.get(index).copied().unwrap_or(0)
     }
 
+    /// 現在の状態または入力から `sector_id` に対応する値を算出し、副作用なく返す。
     fn sector_id(&self) -> [u8; 4] {
         [
             self.parameter(1),
@@ -477,6 +498,7 @@ impl Fdc {
         ]
     }
 
+    /// 現在の状態または入力から `sector_size` に対応する値を算出し、副作用なく返す。
     fn sector_size(&self) -> usize {
         if self.parameter(4) == 0 {
             usize::from(self.parameter(7).max(1))
@@ -487,10 +509,12 @@ impl Fdc {
         }
     }
 
+    /// 現在の状態または入力から `transfer_sector_count` に対応する値を算出し、副作用なく返す。
     fn transfer_sector_count(&self) -> usize {
         self.transfer_sector_ids().len()
     }
 
+    /// FDCのマルチトラック条件から今回転送するCHRN列を組み立てる。
     fn transfer_sector_ids(&self) -> Vec<[u8; 4]> {
         let cylinder = self.parameter(1);
         let start_head = self.parameter(2);
@@ -506,6 +530,7 @@ impl Fdc {
         ids
     }
 
+    /// 選択中FDDに装着された媒体を取得し、未装着ならFDCエラーを返す。
     fn current_image<'a>(
         &self,
         media: &'a BTreeMap<DriveId, MediaImage>,
@@ -514,6 +539,7 @@ impl Fdc {
     }
 }
 
+/// FDC SCAN条件に従いホスト値とセクタ値の大小・ワイルドカードを比較する。
 fn scan_matches(command: u8, disk: &[u8], host: &[u8]) -> bool {
     let ordering = disk
         .iter()
@@ -533,6 +559,7 @@ mod tests {
     use super::*;
     use crate::MediaFormat;
 
+    /// FDCコマンドバイト列をデータレジスタへ順に送って実行させる。
     fn command(fdc: &mut Fdc, media: &mut BTreeMap<DriveId, MediaImage>, bytes: &[u8]) {
         for &byte in bytes {
             fdc.write(3, byte, media);
@@ -540,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    /// `sense_interrupt_only_reports_a_real_seek_or_recalibrate_completion` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn sense_interrupt_only_reports_a_real_seek_or_recalibrate_completion() {
         let mut fdc = Fdc::default();
         let mut media = BTreeMap::new();
@@ -557,6 +585,7 @@ mod tests {
     }
 
     #[test]
+    /// `reads_and_writes_xdf_sector_through_command_phases` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn reads_and_writes_xdf_sector_through_command_phases() {
         let mut bytes = vec![0; 77 * 2 * 8 * 1024];
         bytes[1024] = 0x5a;
@@ -577,6 +606,7 @@ mod tests {
     }
 
     #[test]
+    /// `read_irq_is_asserted_only_for_the_result_phase` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn read_irq_is_asserted_only_for_the_result_phase() {
         let bytes = vec![0; 77 * 2 * 8 * 1024];
         let mut media = BTreeMap::from([(
@@ -602,6 +632,7 @@ mod tests {
     }
 
     #[test]
+    /// `dma_terminal_count_discards_untransferred_sector_tail` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn dma_terminal_count_discards_untransferred_sector_tail() {
         let bytes = vec![0; 77 * 2 * 8 * 1024];
         let mut media = BTreeMap::from([(
@@ -622,6 +653,7 @@ mod tests {
     }
 
     #[test]
+    /// `drive_control_reports_all_four_drives_and_selection_without_motor` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn drive_control_reports_all_four_drives_and_selection_without_motor() {
         let mut media = BTreeMap::from([(
             DriveId::Floppy(3),
@@ -639,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    /// `multi_track_read_continues_from_head_zero_to_head_one` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn multi_track_read_continues_from_head_zero_to_head_one() {
         let mut bytes = vec![0; 77 * 2 * 8 * 1024];
         bytes[8 * 1024] = 0x7b;
@@ -659,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    /// `scan_comparison_honours_ff_wildcards_and_order` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn scan_comparison_honours_ff_wildcards_and_order() {
         assert!(scan_matches(17, &[1, 2, 3], &[1, 0xff, 3]));
         assert!(scan_matches(25, &[1, 2], &[2, 0]));
@@ -668,6 +702,7 @@ mod tests {
     }
 
     #[test]
+    /// `d88_crc_status_reaches_fdc_result_phase` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn d88_crc_status_reaches_fdc_result_phase() {
         const HEADER: usize = 0x2b0;
         let mut bytes = vec![0; HEADER + 16 + 128];

@@ -1,4 +1,5 @@
 class X68kAudioProcessor extends AudioWorkletProcessor {
+  /** PCMキューを初期化し、MessagePortから届くステレオブロックの受信処理を登録する。 */
   constructor() {
     super();
     this.queue = [];
@@ -6,6 +7,7 @@ class X68kAudioProcessor extends AudioWorkletProcessor {
     this.offset = 0;
     this.queuedFrames = 0;
     this.playing = false;
+    // メインスレッドから届いたPCMまたはリセット要求を音声スレッドのキューへ反映する。
     this.port.onmessage = (event) => {
       if (event.data?.type === "reset") {
         this.resetQueue();
@@ -25,6 +27,7 @@ class X68kAudioProcessor extends AudioWorkletProcessor {
     };
   }
 
+  /** 未再生PCMを破棄し、再バッファ開始前の無音状態へ戻す。 */
   resetQueue() {
     this.queue = [];
     this.head = 0;
@@ -33,6 +36,7 @@ class X68kAudioProcessor extends AudioWorkletProcessor {
     this.playing = false;
   }
 
+  /** 消費済みPCMブロックをまとめて除去し、キューの増大を抑える。 */
   compactQueue() {
     if (this.head >= 32) {
       this.queue = this.queue.slice(this.head);
@@ -40,6 +44,7 @@ class X68kAudioProcessor extends AudioWorkletProcessor {
     }
   }
 
+  /** AudioWorkletの出力周期ごとにPCMを左右チャンネルへ供給する。 */
   process(_inputs, outputs) {
     const output = outputs[0];
     if (!output || output.length < 2) return true;

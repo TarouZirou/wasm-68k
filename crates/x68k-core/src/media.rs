@@ -22,6 +22,7 @@ pub(crate) struct MediaImage {
 }
 
 impl MediaImage {
+    /// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
     pub fn parse(
         format: MediaFormat,
         bytes: &[u8],
@@ -57,14 +58,17 @@ impl MediaImage {
         })
     }
 
+    /// 元媒体と書込みオーバーレイを含む現在内容のSHA-256を返す。
     pub fn digest(&self) -> [u8; 32] {
         self.digest
     }
 
+    /// 媒体またはバッファの現在のバイト長を返す。
     pub fn len(&self) -> usize {
         self.original.len()
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub fn read(&self, offset: u64) -> Option<u8> {
         let index = usize::try_from(offset).ok()?;
         self.overlay
@@ -73,6 +77,7 @@ impl MediaImage {
             .or_else(|| self.original.get(index).copied())
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub fn write(&mut self, offset: u64, value: u8) -> bool {
         let Some(index) = usize::try_from(offset).ok() else {
             return false;
@@ -88,6 +93,7 @@ impl MediaImage {
         true
     }
 
+    /// 現在の状態を外部で扱える形式へ変換して出力する。
     pub fn export(&self) -> Vec<u8> {
         let mut bytes = self.original.clone();
         for (&offset, &value) in &self.overlay {
@@ -100,6 +106,7 @@ impl MediaImage {
         bytes
     }
 
+    /// 保存状態へ元媒体データを再接続し、ハッシュ一致を検証する。
     pub fn reattach_original(&mut self, current: &Self) -> bool {
         if self.format != current.format || self.digest != current.digest {
             return false;
@@ -108,6 +115,7 @@ impl MediaImage {
         true
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     pub fn read_sector(
         &self,
         cylinder: u8,
@@ -121,6 +129,7 @@ impl MediaImage {
             .collect()
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     pub fn write_sector(
         &mut self,
         cylinder: u8,
@@ -132,6 +141,7 @@ impl MediaImage {
         self.write_sector_deleted(cylinder, head, sector, size_code, bytes, false)
     }
 
+    /// `write_sector_deleted` の条件が現在成立しているかを、副作用なく判定して返す。
     pub fn write_sector_deleted(
         &mut self,
         cylinder: u8,
@@ -165,6 +175,7 @@ impl MediaImage {
         }
     }
 
+    /// `sector_deleted` の条件が現在成立しているかを、副作用なく判定して返す。
     pub fn sector_deleted(
         &self,
         cylinder: u8,
@@ -180,6 +191,7 @@ impl MediaImage {
         Some(self.read((header + 7) as u64)? & 0x10 != 0)
     }
 
+    /// 現在の状態または入力から `sector_status` に対応する値を算出し、副作用なく返す。
     pub fn sector_status(&self, cylinder: u8, head: u8, sector: u8, size_code: u8) -> Option<u8> {
         if self.format != MediaFormat::D88 {
             self.sector_location(cylinder, head, sector, size_code)?;
@@ -189,6 +201,7 @@ impl MediaImage {
         self.read((header + 8) as u64)
     }
 
+    /// CHRN指定から媒体内セクタのデータ位置と長さを返す。
     fn sector_location(
         &self,
         cylinder: u8,
@@ -212,6 +225,7 @@ impl MediaImage {
         }
     }
 
+    /// DIMジオメトリに従いCHRNをイメージ内オフセットへ変換する。
     fn dim_sector_location(
         &self,
         cylinder: u8,
@@ -259,6 +273,7 @@ impl MediaImage {
             .then_some((offset, geometry.sector_bytes))
     }
 
+    /// D88の可変トラック表を走査して指定CHRNのデータ位置を返す。
     fn d88_sector_location(
         &self,
         cylinder: u8,
@@ -276,11 +291,13 @@ impl MediaImage {
         (end <= declared).then_some((header + 16, length))
     }
 
+    /// D88ヘッダの宣言サイズを検証し、実際にアクセス可能な上限を返す。
     fn d88_declared_size(&self) -> Option<usize> {
         let declared = u32::from_le_bytes(self.original.get(0x1c..0x20)?.try_into().ok()?) as usize;
         (declared >= D88_HEADER_SIZE && declared <= self.original.len()).then_some(declared)
     }
 
+    /// D88セクタヘッダを検証し、CHRN・状態・データ長を復号する。
     fn d88_sector_header(
         &self,
         cylinder: u8,
@@ -334,6 +351,7 @@ struct DimGeometry {
     track_bytes: usize,
 }
 
+/// DIMヘッダと容量からトラック・面・セクタ構成を判定する。
 fn dim_geometry(kind: u8) -> Option<DimGeometry> {
     let (sectors, sector_bytes, size_code) = match kind {
         0 => (8, 1024, 3),
@@ -351,6 +369,7 @@ fn dim_geometry(kind: u8) -> Option<DimGeometry> {
     })
 }
 
+/// 入力または現在状態の妥当性を検査し、問題を呼び出し側へ通知する。
 fn validate_dim(bytes: &[u8]) -> Result<(), MachineError> {
     if bytes.len() == XDF_SIZE {
         return Ok(());
@@ -373,6 +392,7 @@ fn validate_dim(bytes: &[u8]) -> Result<(), MachineError> {
     Ok(())
 }
 
+/// 入力または現在状態の妥当性を検査し、問題を呼び出し側へ通知する。
 fn validate_d88(bytes: &[u8]) -> Result<(), MachineError> {
     if bytes.len() < D88_HEADER_SIZE {
         return Err(invalid(MediaFormat::D88, "header is truncated"));
@@ -426,6 +446,7 @@ fn validate_d88(bytes: &[u8]) -> Result<(), MachineError> {
     Ok(())
 }
 
+/// 媒体パーサの検証失敗を文脈付きのMachineErrorとして構築する。
 fn invalid(format: MediaFormat, reason: impl Into<String>) -> MachineError {
     MachineError::InvalidMedia {
         format,
@@ -438,6 +459,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `cow_export_does_not_change_source` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn cow_export_does_not_change_source() {
         let bytes = vec![0; XDF_SIZE];
         let mut image = MediaImage::parse(MediaFormat::Xdf, &bytes, false).unwrap();
@@ -448,6 +470,7 @@ mod tests {
     }
 
     #[test]
+    /// `offsets_larger_than_wasm_address_space_are_rejected` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn offsets_larger_than_wasm_address_space_are_rejected() {
         let mut image = MediaImage::parse(MediaFormat::Hdf, &[0; 256], false).unwrap();
         let offset = u64::from(u32::MAX) + 1;
@@ -456,16 +479,19 @@ mod tests {
     }
 
     #[test]
+    /// `hdf_accepts_a_single_sasi_block` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn hdf_accepts_a_single_sasi_block() {
         let image = MediaImage::parse(MediaFormat::Hdf, &[0; 256], false).unwrap();
         assert_eq!(image.len(), 256);
     }
 
     #[test]
+    /// `rejects_short_d88` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn rejects_short_d88() {
         assert!(MediaImage::parse(MediaFormat::D88, &[0; 10], true).is_err());
     }
 
+    /// `one_sector_d88` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn one_sector_d88(protected: bool) -> Vec<u8> {
         let mut bytes = vec![0; D88_HEADER_SIZE + 16 + 128];
         let size = bytes.len() as u32;
@@ -480,6 +506,7 @@ mod tests {
     }
 
     #[test]
+    /// `d88_deleted_mark_is_part_of_copy_on_write_overlay` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn d88_deleted_mark_is_part_of_copy_on_write_overlay() {
         let bytes = one_sector_d88(false);
         let mut image = MediaImage::parse(MediaFormat::D88, &bytes, false).unwrap();
@@ -494,12 +521,14 @@ mod tests {
     }
 
     #[test]
+    /// `d88_header_write_protection_is_enforced` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn d88_header_write_protection_is_enforced() {
         let image = MediaImage::parse(MediaFormat::D88, &one_sector_d88(true), false).unwrap();
         assert!(image.write_protected);
     }
 
     #[test]
+    /// `d88_reserved_header_bits_do_not_force_write_protection` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn d88_reserved_header_bits_do_not_force_write_protection() {
         let mut bytes = one_sector_d88(false);
         bytes[0x1a] = 0x01;
@@ -508,6 +537,7 @@ mod tests {
     }
 
     #[test]
+    /// `d88_declared_size_bounds_track_and_sector_access` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn d88_declared_size_bounds_track_and_sector_access() {
         let mut bytes = one_sector_d88(false);
         // Keep the physical buffer larger than the declared image and point
@@ -520,6 +550,7 @@ mod tests {
     }
 
     #[test]
+    /// `d88_sector_status_is_preserved_for_fdc_error_reporting` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn d88_sector_status_is_preserved_for_fdc_error_reporting() {
         let mut bytes = one_sector_d88(false);
         bytes[D88_HEADER_SIZE + 8] = 0xb0;
@@ -528,6 +559,7 @@ mod tests {
     }
 
     #[test]
+    /// `dim_sparse_track_flags_map_compact_payload` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn dim_sparse_track_flags_map_compact_payload() {
         let mut bytes = vec![0; DIM_HEADER_SIZE + 2 * 9 * 1024];
         bytes[0] = 1;
@@ -540,6 +572,7 @@ mod tests {
     }
 
     #[test]
+    /// `malformed_media_inputs_never_panic` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn malformed_media_inputs_never_panic() {
         let mut seed = 0x1234_5678u32;
         for length in 0..1024 {

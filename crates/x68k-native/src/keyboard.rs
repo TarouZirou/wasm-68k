@@ -23,11 +23,13 @@ impl KeyboardState {
         (!self.pressed.values().any(|value| *value == scancode)).then_some(scancode)
     }
 
+    /// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
     pub(crate) fn drain(&mut self) -> HashSet<u8> {
         self.pressed.drain().map(|(_, scan)| scan).collect()
     }
 }
 
+/// ホストの物理キーコードをX68000キーボードのスキャンコードへ変換する。
 fn x68k_scancode(code: KeyCode) -> Option<u8> {
     Some(match code {
         KeyCode::Escape => 0x01,
@@ -145,6 +147,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `maps_host_keys_to_x68000_matrix_codes` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn maps_host_keys_to_x68000_matrix_codes() {
         for (key, scan) in [
             (KeyCode::Enter, 0x1d),
@@ -166,6 +169,7 @@ mod tests {
     }
 
     #[test]
+    /// `shared_modifier_emits_break_only_after_both_host_keys_are_released` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn shared_modifier_emits_break_only_after_both_host_keys_are_released() {
         let mut keyboard = KeyboardState::default();
         assert_eq!(keyboard.press(KeyCode::ShiftLeft), Some(0x70));
@@ -175,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    /// `drain_deduplicates_shared_hardware_keys` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn drain_deduplicates_shared_hardware_keys() {
         let mut keyboard = KeyboardState::default();
         keyboard.press(KeyCode::ControlLeft);

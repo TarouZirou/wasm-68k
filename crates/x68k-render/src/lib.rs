@@ -385,6 +385,7 @@ mod tests {
         rgb: [u8; 3],
     }
 
+    /// RustとWGSLのGRBi整数変換が同じテストベクトルになることを検証する。
     fn shader_integer_conversion(pixel: u16) -> [u8; 3] {
         let pixel = u32::from(pixel);
         let intensity = pixel & 1;
@@ -399,6 +400,7 @@ mod tests {
     }
 
     #[test]
+    /// `wgsl_formula_matches_shared_grbi_vectors` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn wgsl_formula_matches_shared_grbi_vectors() {
         assert!(include_str!("shader.wgsl").contains("fn grbi_to_rgb8"));
         let vectors: Vec<Vector> = serde_json::from_str(include_str!(

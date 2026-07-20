@@ -17,6 +17,7 @@ pub(crate) struct Scc {
 }
 
 impl Scc {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&mut self, offset: u32) -> u8 {
         match offset & 7 {
             1 => {
@@ -37,6 +38,7 @@ impl Scc {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(&mut self, offset: u32, value: u8) {
         match offset & 7 {
             1 => {
@@ -75,11 +77,13 @@ impl Scc {
         }
     }
 
+    /// ホストの相対移動量をX68000マウスカウンタへ加算する。
     pub(crate) fn move_mouse(&mut self, dx: i16, dy: i16) {
         self.mouse_dx = self.mouse_dx.saturating_add(dx);
         self.mouse_dy = self.mouse_dy.saturating_add(dy);
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub(crate) fn set_button(&mut self, button: u8, pressed: bool) {
         let mask = 1u8.checked_shl(u32::from(button.min(7))).unwrap_or(0);
         if pressed {
@@ -89,6 +93,13 @@ impl Scc {
         }
     }
 
+    /// SCCが保持する現在のX68000マウスボタンビットを返す。
+    pub(crate) fn mouse_buttons(&self) -> u8 {
+        // 診断JSON用。packetをlatchしなくてもfrontendの変換結果を検査できる。
+        self.mouse_buttons
+    }
+
+    /// `interrupt_pending` の条件が現在成立しているかを、副作用なく判定して返す。
     pub(crate) fn interrupt_pending(&self) -> bool {
         let receive_mode = self.registers_b[1] & 0x18;
         self.registers_b[9] & 0x08 != 0
@@ -96,6 +107,7 @@ impl Scc {
                 || (self.receive.len() == 3 && receive_mode == 0x08))
     }
 
+    /// 割り込み状態を更新し、CPUと周辺機器のハンドシェイクを進める。
     pub(crate) fn acknowledge(&self) -> u8 {
         if self.registers_b[9] & 2 != 0 {
             return 0xff;
@@ -109,6 +121,7 @@ impl Scc {
         self.vector
     }
 
+    /// 現在の移動量とボタン状態をSCCマウスパケットとしてラッチする。
     fn latch_mouse_packet(&mut self) {
         let dx = self.mouse_dx.clamp(-128, 127) as i8;
         let dy = self.mouse_dy.clamp(-128, 127) as i8;
@@ -124,6 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `rts_edge_latches_three_byte_mouse_packet` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn rts_edge_latches_three_byte_mouse_packet() {
         let mut scc = Scc::default();
         scc.write(1, 3);

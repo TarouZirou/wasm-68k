@@ -33,6 +33,7 @@ pub(crate) struct Crtc {
 }
 
 impl Default for Crtc {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             regs: vec![0; 48],
@@ -54,6 +55,7 @@ impl Default for Crtc {
 }
 
 impl Crtc {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&self, offset: u32) -> u8 {
         if offset < 0x400 {
             let register = (offset & 0x3f) as usize;
@@ -98,6 +100,7 @@ impl Crtc {
         None
     }
 
+    /// CRTCを次の走査線へ進め、フレーム終端なら新しいフレームを開始する。
     pub(crate) fn next_scanline(&mut self) -> Vec<Signal> {
         self.current_line = (self.current_line + 1) % self.v_total.max(1);
         let mut signals = vec![Signal::HorizontalSync];
@@ -139,22 +142,27 @@ impl Crtc {
         }
     }
 
+    /// `at_visible_start` の条件が現在成立しているかを、副作用なく判定して返す。
     pub(crate) fn at_visible_start(&self) -> bool {
         self.current_line == self.v_start
     }
 
+    /// CRTCレジスタから確定した現在の論理解像度を返す。
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         (u32::from(self.width), u32::from(self.height))
     }
 
+    /// 現在のレジスタ値または入力から `text_scroll` に対応する描画・転送情報を算出して返す。
     pub(crate) fn text_scroll(&self) -> (u16, u16) {
         (self.text_scroll[0], self.text_scroll[1])
     }
 
+    /// 現在のレジスタ値または入力から `graphic_scrolls` に対応する描画・転送情報を算出して返す。
     pub(crate) fn graphic_scrolls(&self) -> [[u16; 2]; 4] {
         self.graphic_scroll
     }
 
+    /// 現在のレジスタ値または入力から `memory_mode` に対応する描画・転送情報を算出して返す。
     pub(crate) fn memory_mode(&self) -> u8 {
         self.regs[0x28]
     }
@@ -186,14 +194,17 @@ impl Crtc {
         }
     }
 
+    /// 現在のレジスタ値または入力から `v_total` に対応する描画・転送情報を算出して返す。
     pub(crate) fn v_total(&self) -> u16 {
         self.v_total
     }
 
+    /// `high_resolution` の条件が現在成立しているかを、副作用なく判定して返す。
     pub(crate) fn high_resolution(&self) -> bool {
         self.regs[0x29] & 0x10 != 0
     }
 
+    /// 現在のレジスタ値または入力から `fast_clear_dimensions` に対応する描画・転送情報を算出して返す。
     pub(crate) fn fast_clear_dimensions(&self) -> (u32, u32) {
         (
             if self.regs[0x29] & 3 != 0 { 512 } else { 256 },
@@ -201,19 +212,24 @@ impl Crtc {
         )
     }
 
+    /// MFPへ入力する現在のGPIP信号レベルを各デバイスから合成する。
     pub(crate) fn gpip(&self, horizontal_sync_high: bool) -> u8 {
         let visible = (self.v_start..self.v_end).contains(&self.current_line);
-        let mut value = 0x20 | if visible { 0x13 } else { 0x03 };
+        // GPIP3 (OPM IRQ) はactive-low。CRTC単体では非assertのhighを返し、
+        // BusがYM2151のIRQ状態に応じてこのbitを落とす。
+        let mut value = 0x28 | if visible { 0x13 } else { 0x03 };
         if self.current_line != self.raster_line {
             value |= 0x40;
         }
         value | if horizontal_sync_high { 0x80 } else { 0 }
     }
 
+    /// 入力値を `pair` に対応する内部表現へ変換して返す。
     fn pair(&self, register: usize) -> u16 {
         (u16::from(self.regs[register]) << 8) | u16::from(self.regs[register + 1])
     }
 
+    /// CRTCレジスタから解像度・同期・走査タイミングを再計算する。
     fn recalculate(&mut self, register: usize) {
         match register {
             0x04 | 0x05 => self.h_start = self.pair(0x04) & 1023,
@@ -248,6 +264,7 @@ impl Crtc {
         .clamp(1, 1024);
     }
 
+    /// CRTCラスタコピー指定に従いテキストVRAMの対象行を複製する。
     fn raster_copy(&mut self, tvram: &mut [u8]) {
         let source = usize::from(self.regs[0x2c]) << 9;
         let destination = usize::from(self.regs[0x2d]) << 9;
@@ -274,6 +291,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `register_pairs_update_visible_size_and_scroll` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn register_pairs_update_visible_size_and_scroll() {
         let mut crtc = Crtc::default();
         let mut tvram = vec![0; 0x80000];
@@ -288,6 +306,7 @@ mod tests {
     }
 
     #[test]
+    /// `concurrent_masked_tvram_write_updates_selected_planes` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn concurrent_masked_tvram_write_updates_selected_planes() {
         let mut crtc = Crtc::default();
         let mut tvram = vec![0xa5; 0x80000];
@@ -302,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    /// `operation_port_returns_fast_clear_plane_mask` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn operation_port_returns_fast_clear_plane_mask() {
         let mut crtc = Crtc::default();
         let mut tvram = vec![0; 0x80000];
@@ -311,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    /// `high_resolution_256_line_mode_samples_odd_raw_scanlines` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn high_resolution_256_line_mode_samples_odd_raw_scanlines() {
         let mut crtc = Crtc::default();
         crtc.regs[0x29] = 0x10;

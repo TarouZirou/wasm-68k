@@ -3,11 +3,13 @@ use std::path::PathBuf;
 
 use x68k_core::{DriveId, Machine, MachineConfig, MediaFormat, RomKind};
 
+/// 16進文字列を検証し、対応するバイト列へ復号する。
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
+/// `official_ipl_boots_human68k_to_the_command_prompt_workload` が想定する振る舞いを満たし、回帰がないことを検証する。
 fn official_ipl_boots_human68k_to_the_command_prompt_workload() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let ipl = fs::read(root.join("web/public/sharp/IPLROM.DAT")).expect("official IPL fixture");

@@ -12,6 +12,7 @@ pub(crate) struct SpriteBg {
 }
 
 impl Default for SpriteBg {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             bytes: vec![0; 0x1_0000],
@@ -20,16 +21,19 @@ impl Default for SpriteBg {
 }
 
 impl SpriteBg {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&self, offset: u32) -> u8 {
         self.bytes.get(offset as usize).copied().unwrap_or(0xff)
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(&mut self, offset: u32, value: u8) {
         if let Some(byte) = self.bytes.get_mut(offset as usize) {
             *byte = value;
         }
     }
 
+    /// 現在の状態や結果を利用者向けの診断情報として提示する。
     pub(crate) fn diagnostics(&self) -> Vec<(u8, u16, u16, u16, u8)> {
         (0..128)
             .filter_map(|number| {
@@ -49,6 +53,7 @@ impl SpriteBg {
     }
 
     #[cfg(test)]
+    /// 現在のレジスタ値または入力から `pixel` に対応する描画・転送情報を算出して返す。
     pub(crate) fn pixel(&self, video: &Video, x: u32, y: u32) -> Option<u16> {
         if self.bytes[0x808] & 2 == 0 {
             return None;
@@ -124,6 +129,7 @@ impl SpriteBg {
         (selected, count)
     }
 
+    /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
     fn draw_sprites_scanline(
         &self,
         video: &Video,
@@ -178,6 +184,7 @@ impl SpriteBg {
         }
     }
 
+    /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
     fn draw_bg_scanline(&self, video: &Video, width: u32, y: u32, plane: usize, line: &mut [u32]) {
         for x in 0..width {
             if let Some(colour) = self.bg_pixel(video, x, y, plane) {
@@ -187,6 +194,7 @@ impl SpriteBg {
     }
 
     #[cfg(test)]
+    /// 現在のレジスタ値または入力から `sprite_pixel` に対応する描画・転送情報を算出して返す。
     fn sprite_pixel(&self, video: &Video, x: u32, y: u32, priority: u8) -> Option<u16> {
         let mut result = None;
         for number in (0..128).rev() {
@@ -235,6 +243,7 @@ impl SpriteBg {
         result
     }
 
+    /// 現在のレジスタ値または入力から `bg_pixel` に対応する描画・転送情報を算出して返す。
     fn bg_pixel(&self, video: &Video, x: u32, y: u32, plane: usize) -> Option<u16> {
         let control = self.bytes[0x811];
         let tile_size = if control & 3 == 0 { 8usize } else { 16 };
@@ -287,6 +296,7 @@ impl SpriteBg {
     }
 }
 
+/// 現在のレジスタ値または入力から `pattern_address` に対応する描画・転送情報を算出して返す。
 fn pattern_address(pattern: usize, tile_size: usize, x: usize, y: usize) -> usize {
     if tile_size == 8 {
         pattern * 32 + y * 4 + x / 2
@@ -300,6 +310,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `sprite_pattern_uses_text_palette` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn sprite_pattern_uses_text_palette() {
         let mut video = Video::default();
         video.write(0x200 + 2, 0x07);
@@ -316,6 +327,7 @@ mod tests {
     }
 
     #[test]
+    /// `bg_planes_and_sprite_priorities_follow_hardware_order` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn bg_planes_and_sprite_priorities_follow_hardware_order() {
         let mut video = Video::default();
         for (index, colour) in [(1usize, 0x1111u16), (2, 0x2222), (3, 0x3333)] {
@@ -351,6 +363,7 @@ mod tests {
     }
 
     #[test]
+    /// `sprite_priority_uses_low_byte_of_the_word_register` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn sprite_priority_uses_low_byte_of_the_word_register() {
         let mut video = Video::default();
         video.write(0x202, 0x07);
@@ -369,6 +382,7 @@ mod tests {
     }
 
     #[test]
+    /// `sprite_coordinates_are_ten_bit_registers` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn sprite_coordinates_are_ten_bit_registers() {
         let mut video = Video::default();
         video.write(0x202, 0x07);
@@ -385,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    /// `scanline_selects_only_the_first_32_sprite_numbers` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn scanline_selects_only_the_first_32_sprite_numbers() {
         let mut video = Video::default();
         video.write(0x202, 0x07);
@@ -410,6 +425,7 @@ mod tests {
     }
 
     #[test]
+    /// `frame_renderer_matches_pixel_renderer_and_keeps_opaque_black` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn frame_renderer_matches_pixel_renderer_and_keeps_opaque_black() {
         let mut video = Video::default();
         video.write(0x202, 0x07);
@@ -435,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    /// `bg1_remains_visible_in_16_pixel_mode_and_txsel_is_exact` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn bg1_remains_visible_in_16_pixel_mode_and_txsel_is_exact() {
         let mut video = Video::default();
         video.write(0x202, 0x11);

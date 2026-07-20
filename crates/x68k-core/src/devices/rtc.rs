@@ -20,6 +20,7 @@ pub(crate) struct Rtc {
 }
 
 impl Default for Rtc {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             seconds: 0,
@@ -37,6 +38,7 @@ impl Default for Rtc {
 }
 
 impl Rtc {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&self, offset: u32) -> u8 {
         if offset > 0x1f || offset & 1 == 0 {
             return 0;
@@ -51,6 +53,7 @@ impl Rtc {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(&mut self, offset: u32, value: u8) {
         if offset > 0x1f || offset & 1 == 0 {
             return;
@@ -80,6 +83,7 @@ impl Rtc {
         }
     }
 
+    /// 経過CPUクロックをデバイス固有クロックへ変換し、タイマーと転送状態を進める。
     pub(crate) fn tick(&mut self, cycles: u32, clock_hz: u32) -> bool {
         let clock = u64::from(clock_hz.max(1));
         self.subsecond_cycles = self.subsecond_cycles.saturating_add(u64::from(cycles));
@@ -103,6 +107,7 @@ impl Rtc {
         interrupt
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_clock(&self, register: usize) -> u8 {
         let (year, month, day, weekday, mut hour, minute, second) = self.calendar();
         let twenty_four_hour = self.bank1[10] & 1 != 0;
@@ -134,6 +139,7 @@ impl Rtc {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_bank1(&self, register: usize) -> u8 {
         match register {
             11 => ((self.calendar().0 - 1980) & 3) as u8,
@@ -142,6 +148,7 @@ impl Rtc {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_clock(&mut self, register: usize, value: u8) {
         let (mut year, mut month, mut day, weekday, mut hour, mut minute, mut second) =
             self.calendar();
@@ -183,11 +190,13 @@ impl Rtc {
         self.weekday_offset = (weekday + 7 - natural) % 7;
     }
 
+    /// `alarm_matches` の条件が現在成立しているかを、副作用なく判定して返す。
     fn alarm_matches(&self) -> bool {
         // RP5C15のalarm比較対象は分・時・曜日・日。各BCD桁をそのまま比較する。
         (2..=8).all(|register| self.bank1[register] == self.read_clock(register))
     }
 
+    /// RTCの通算秒をX68000のカレンダーレジスタ値へ展開する。
     fn calendar(&self) -> (u16, u8, u8, u8, u8, u8, u8) {
         let second = (self.seconds % 60) as u8;
         let minute = (self.seconds / 60 % 60) as u8;
@@ -213,6 +222,7 @@ impl Rtc {
     }
 }
 
+/// RTCカレンダー各欄を基準時刻からの通算秒へ変換する。
 fn seconds_from_calendar(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> u64 {
     let mut days = 0u64;
     for current in 1980..year {
@@ -225,10 +235,12 @@ fn seconds_from_calendar(year: u16, month: u8, day: u8, hour: u8, minute: u8, se
     days * 86_400 + u64::from(hour) * 3600 + u64::from(minute) * 60 + u64::from(second)
 }
 
+/// 年月日からRTCが返す曜日番号を計算する。
 fn natural_weekday(year: u16, month: u8, day: u8) -> u8 {
     ((2 + seconds_from_calendar(year, month, day, 0, 0, 0) / 86_400) % 7) as u8
 }
 
+/// 指定年・月の日数をうるう年込みで返す。
 fn month_length(year: u16, month: u8) -> u8 {
     match month {
         2 if leap(year) => 29,
@@ -238,6 +250,7 @@ fn month_length(year: u16, month: u8) -> u8 {
     }
 }
 
+/// 指定年がうるう年かを判定する。
 fn leap(year: u16) -> bool {
     year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
@@ -247,6 +260,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `advances_deterministically_from_1980_epoch` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn advances_deterministically_from_1980_epoch() {
         let mut rtc = Rtc::default();
         rtc.tick(10_000_000, 10_000_000);
@@ -256,6 +270,7 @@ mod tests {
     }
 
     #[test]
+    /// `bank_date_writes_and_timer_stop_follow_rp5c15_registers` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn bank_date_writes_and_timer_stop_follow_rp5c15_registers() {
         let mut rtc = Rtc::default();
         rtc.write(0x1b, MODE_BANK);
@@ -283,6 +298,7 @@ mod tests {
     }
 
     #[test]
+    /// `bank_one_exposes_24_hour_and_leap_year_registers` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn bank_one_exposes_24_hour_and_leap_year_registers() {
         let mut rtc = Rtc::default();
         rtc.write(0x1b, MODE_TIMER_ENABLE | MODE_BANK);

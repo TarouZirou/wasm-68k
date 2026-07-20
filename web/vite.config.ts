@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [
     {
       name: "include-license",
+      /** 公開成果物へライセンスと第三者通知を改変せず同梱する。 */
       generateBundle() {
         for (const fileName of ["LICENSE", "../LICENSE-EXCEPTION", "../THIRD_PARTY_NOTICES.md"]) {
           this.emitFile({

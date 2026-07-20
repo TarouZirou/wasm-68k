@@ -45,12 +45,14 @@ struct State {
 }
 
 impl State {
+    /// テスト用バスのRAMを可変スライスとしてCPUテストへ公開する。
     fn data(&self, index: usize) -> u32 {
         [
             self.d0, self.d1, self.d2, self.d3, self.d4, self.d5, self.d6, self.d7,
         ][index]
     }
 
+    /// 入力を処理待ちキューへ追加し、後続処理で利用できるようにする。
     fn address(&self, index: usize) -> u32 {
         [
             self.a0, self.a1, self.a2, self.a3, self.a4, self.a5, self.a6,
@@ -77,6 +79,7 @@ struct SparseBus {
 }
 
 impl AddressBus for SparseBus {
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_byte(&mut self, address: u32) -> u8 {
         self.memory
             .get(&(address & 0x00ff_ffff))
@@ -84,6 +87,7 @@ impl AddressBus for SparseBus {
             .unwrap_or(0)
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_word(&mut self, address: u32) -> u16 {
         u16::from_be_bytes([
             self.read_byte(address),
@@ -91,6 +95,7 @@ impl AddressBus for SparseBus {
         ])
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_long(&mut self, address: u32) -> u32 {
         u32::from_be_bytes([
             self.read_byte(address),
@@ -100,16 +105,19 @@ impl AddressBus for SparseBus {
         ])
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_byte(&mut self, address: u32, value: u8) {
         self.memory.insert(address & 0x00ff_ffff, value);
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_word(&mut self, address: u32, value: u16) {
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write_byte(address.wrapping_add(offset as u32), byte);
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_long(&mut self, address: u32, value: u32) {
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write_byte(address.wrapping_add(offset as u32), byte);
@@ -117,6 +125,7 @@ impl AddressBus for SparseBus {
     }
 }
 
+/// 入力データを検証して読み込み、対応する実行状態へ反映する。
 fn load_cpu(cpu: &mut CpuCore, state: &State) {
     cpu.set_cpu_type(CpuType::M68000);
     cpu.set_sst_m68000_compat(true);
@@ -138,6 +147,7 @@ fn load_cpu(cpu: &mut CpuCore, state: &State) {
     });
 }
 
+/// SRのスーパーバイザビットに従い、比較対象のスタックポインタを選ぶ。
 fn supervisor_sp(cpu: &CpuCore) -> u32 {
     if cpu.is_supervisor() {
         cpu.sp()
@@ -146,6 +156,7 @@ fn supervisor_sp(cpu: &CpuCore) -> u32 {
     }
 }
 
+/// 命令テストで比較対象とするステータスレジスタのビットマスクを返す。
 fn sr_mask(opcode: u16) -> u16 {
     let group = opcode >> 12;
     let op_mode = (opcode >> 6) & 7;
@@ -155,6 +166,7 @@ fn sr_mask(opcode: u16) -> u16 {
     if bcd { !0x000a } else { 0xffff }
 }
 
+/// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
 fn run_case(test: &TestCase, source: &str, index: usize) -> Result<(), String> {
     // re/we は実バスの AS/UDS/LDS タイミングを検証するケースであり、命令コアの
     // AddressBus API では表現できない。X68000 側のアドレスエラー試験で別途検証する。
@@ -211,6 +223,7 @@ fn run_case(test: &TestCase, source: &str, index: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// 上流JSONに明示されたアドレスエラーを期待例外として記録する。
 fn mark_json_address_errors(test: &mut TestCase) {
     test.has_address_error |= test.transactions.iter().any(|transaction| {
         transaction
@@ -220,6 +233,7 @@ fn mark_json_address_errors(test: &mut TestCase) {
     });
 }
 
+/// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
 fn run_cases(cases: &mut [TestCase], source: &str) {
     let mut failures = Vec::new();
     for (index, test) in cases.iter_mut().enumerate() {
@@ -235,6 +249,7 @@ fn run_cases(cases: &mut [TestCase], source: &str) {
 }
 
 #[test]
+/// `representative_json_from_pinned_revision` が想定する振る舞いを満たし、回帰がないことを検証する。
 fn representative_json_from_pinned_revision() {
     let source = include_str!("fixtures/m68000/representative.json");
     let mut cases: Vec<TestCase> = serde_json::from_str(source).expect("valid SST JSON fixture");
@@ -272,12 +287,14 @@ fn full_binary_corpus_from_pinned_revision() {
     }
 }
 
+/// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
 fn take_u8(bytes: &[u8], cursor: &mut usize) -> Result<u8, String> {
     let value = *bytes.get(*cursor).ok_or("unexpected EOF")?;
     *cursor += 1;
     Ok(value)
 }
 
+/// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
 fn take_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16, String> {
     let end = cursor.checked_add(2).ok_or("offset overflow")?;
     let raw: [u8; 2] = bytes
@@ -289,6 +306,7 @@ fn take_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16, String> {
     Ok(u16::from_le_bytes(raw))
 }
 
+/// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
 fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, String> {
     let end = cursor.checked_add(4).ok_or("offset overflow")?;
     let raw: [u8; 4] = bytes
@@ -300,6 +318,7 @@ fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, String> {
     Ok(u32::from_le_bytes(raw))
 }
 
+/// 命令テスト名から対象データブロックを取得する。
 fn block(bytes: &[u8], cursor: &mut usize, magic: u32) -> Result<(), String> {
     let _length = take_u32(bytes, cursor)?;
     let actual = take_u32(bytes, cursor)?;
@@ -308,6 +327,7 @@ fn block(bytes: &[u8], cursor: &mut usize, magic: u32) -> Result<(), String> {
         .ok_or_else(|| format!("bad magic {actual:#010x}"))
 }
 
+/// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
 fn decode_name(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
     block(bytes, cursor, MAGIC_NAME)?;
     let length = take_u32(bytes, cursor)? as usize;
@@ -319,6 +339,7 @@ fn decode_name(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
     Ok(name)
 }
 
+/// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
 fn decode_state(bytes: &[u8], cursor: &mut usize) -> Result<State, String> {
     block(bytes, cursor, MAGIC_STATE)?;
     let mut registers = [0; 19];
@@ -359,6 +380,7 @@ fn decode_state(bytes: &[u8], cursor: &mut usize) -> Result<State, String> {
     })
 }
 
+/// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
 fn decode_transactions(bytes: &[u8], cursor: &mut usize) -> Result<(u32, bool), String> {
     block(bytes, cursor, MAGIC_TXNS)?;
     let cycles = take_u32(bytes, cursor)?;
@@ -378,6 +400,7 @@ fn decode_transactions(bytes: &[u8], cursor: &mut usize) -> Result<(u32, bool), 
     Ok((cycles, address_error))
 }
 
+/// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
 fn decode_binary(path: &Path) -> Result<Vec<TestCase>, String> {
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
     let mut cursor = 0;

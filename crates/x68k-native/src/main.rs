@@ -27,6 +27,7 @@ struct MidiOutput {
 }
 
 impl MidiOutput {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     fn new() -> anyhow::Result<Self> {
         let output = midir::MidiOutput::new("wasm-68k")?;
         let port = output
@@ -45,6 +46,7 @@ impl MidiOutput {
         })
     }
 
+    /// MIDIメッセージを選択済みのネイティブ出力ポートへ送信する。
     fn send(&mut self, bytes: Vec<u8>) {
         for message in self.parser.push(&bytes) {
             if let Err(error) = self.connection.send(&message) {
@@ -63,6 +65,7 @@ struct MidiParser {
 }
 
 impl MidiParser {
+    /// 入力を処理待ちキューへ追加し、後続処理で利用できるようにする。
     fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         let mut complete = Vec::new();
         for &byte in bytes {
@@ -106,6 +109,7 @@ impl MidiParser {
     }
 }
 
+/// MIDIステータスバイトからメッセージ全体のバイト数を返す。
 fn midi_message_length(status: u8) -> usize {
     match status {
         0x80..=0xbf | 0xe0..=0xef | 0xf2 => 3,
@@ -131,12 +135,14 @@ struct QueueCallback {
 impl AudioCallback for QueueCallback {
     type Channel = f32;
 
+    /// MIDI出力コールバックをコアへ登録し、生成メッセージを転送する。
     fn callback(&mut self, output: &mut [f32]) {
         write_audio(output, self.channels, &self.queue);
     }
 }
 
 impl AudioOutput {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     fn new() -> anyhow::Result<Self> {
         let sdl = sdl2::init().map_err(anyhow::Error::msg)?;
         let audio = sdl.audio().map_err(anyhow::Error::msg)?;
@@ -169,6 +175,7 @@ impl AudioOutput {
         })
     }
 
+    /// 入力を処理待ちキューへ追加し、後続処理で利用できるようにする。
     fn enqueue(&self, samples: Vec<f32>) {
         let Ok(mut queue) = self.queue.lock() else {
             return;
@@ -185,6 +192,7 @@ impl AudioOutput {
     }
 }
 
+/// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
 fn write_audio(output: &mut [f32], channels: usize, queue: &Mutex<VecDeque<f32>>) {
     let Ok(mut queue) = queue.lock() else {
         output.fill(0.0);
@@ -218,6 +226,7 @@ struct App {
 }
 
 impl App {
+    /// 入力イベントを処理し、対応するエミュレータ状態と外部出力を更新する。
     fn release_all_inputs(&mut self) {
         for scancode in self.keyboard.drain() {
             self.machine.input(InputEvent::Key {
@@ -235,6 +244,7 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    /// 対象機能の実行状態を切り替え、関連リソースを整合させる。
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -270,6 +280,7 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// ウィンドウ入力・リサイズ・再描画要求を各サブシステムへ配送する。
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -341,6 +352,7 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// デバイス由来の入力イベントをエミュレータ操作へ変換する。
     fn device_event(
         &mut self,
         _event_loop: &ActiveEventLoop,
@@ -355,6 +367,7 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// イベント待機前に次のフレーム描画を要求する。
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         if now >= self.next_frame {
@@ -367,6 +380,7 @@ impl ApplicationHandler for App {
     }
 }
 
+/// アプリケーションを初期化し、実行に必要な各コンポーネントを起動する。
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 

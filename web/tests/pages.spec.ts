@@ -15,11 +15,13 @@ interface DiagnosticReport {
   fdc_st0: number;
   fdc_st1: number;
   fdc_st2: number;
+  mouse_buttons: number;
   frame_sha256: string;
   audio_peak: number;
   content: Array<{ slot: string; sha256: string }>;
 }
 
+/** `downloadDiagnostics` が想定する振る舞いを満たし、回帰がないことを検証する。 */
 async function downloadDiagnostics(page: Page): Promise<DiagnosticReport> {
   const downloadPromise = page.waitForEvent("download");
   await page.locator("#diagnostics").click();
@@ -29,6 +31,7 @@ async function downloadDiagnostics(page: Page): Promise<DiagnosticReport> {
   return JSON.parse(reportText) as DiagnosticReport;
 }
 
+/** `readDownload` が想定する振る舞いを満たし、回帰がないことを検証する。 */
 async function readDownload(page: Page, selector: string): Promise<Buffer> {
   const downloadPromise = page.waitForEvent("download");
   await page.locator(selector).click();
@@ -49,6 +52,9 @@ test("Pages base path loads Wasm and AudioWorklet", async ({ page }) => {
   await expect(page.locator("#backend")).not.toBeEmpty();
   expect([...loaded].some((path) => path.startsWith("/wasm-68k/assets/") && path.endsWith(".wasm"))).toBeTruthy();
 
+  // PCM生成はWeb Audioを開始するユーザー操作後だけ有効になる。
+  await page.locator("#audio").click();
+  await expect(page.locator("#audio")).toHaveText("音声有効");
   await page.locator("#diagnostic-rom").click();
   await expect(page.locator("#ipl-name")).toHaveText("合成診断IPL");
   await expect(page.locator("#fdd0-name")).toHaveText("builtin-diagnostic.xdf");
@@ -63,7 +69,6 @@ test("Pages base path loads Wasm and AudioWorklet", async ({ page }) => {
   expect(report.content.map(({ slot }) => slot).sort()).toEqual(["fdd:0", "hdd:0", "rom:ipl"]);
   expect(report.content.every(({ sha256 }) => /^[0-9a-f]{64}$/.test(sha256))).toBeTruthy();
   await expect(page.locator("#pause")).toHaveText("再開");
-  await page.locator("#audio").click();
   // AudioWorkletGlobalScopeの取得はpageのresponseイベントへ公開されない環境が
   // あるため、addModule完了後にだけ変わるUIと同じbaseの実資産を検証する。
   await expect(page.locator("#audio")).toHaveText("音声有効");
@@ -225,6 +230,18 @@ test("X68000 keyboard map replaces legacy PC scan codes", async ({ page }) => {
   expect(migrated.F1).toBe(0x63);
 });
 
+test("browser right button maps to the X68000 right button", async ({ page }) => {
+  await page.goto("/wasm-68k/?autopause=1");
+  await expect(page.locator("#status")).toContainText("準備完了");
+  const canvas = page.locator("#screen");
+
+  await canvas.dispatchEvent("mousedown", { button: 2 });
+  expect((await downloadDiagnostics(page)).mouse_buttons).toBe(0b010);
+
+  await page.evaluate(() => window.dispatchEvent(new MouseEvent("mouseup", { button: 2 })));
+  expect((await downloadDiagnostics(page)).mouse_buttons).toBe(0);
+});
+
 test("drag-and-drop mounts HDF and X68S state round-trips", async ({ page }) => {
   await page.goto("/wasm-68k/?autopause=1");
   await expect(page.locator("#status")).toContainText("準備完了");
@@ -242,7 +259,7 @@ test("drag-and-drop mounts HDF and X68S state round-trips", async ({ page }) => 
   await expect(page.locator("#ipl-name")).toHaveText("合成診断IPL");
   const state = await readDownload(page, "#export-state");
   expect(state.subarray(0, 4).toString("ascii")).toBe("X68S");
-  expect(state.readUInt16LE(4)).toBe(8);
+  expect(state.readUInt16LE(4)).toBe(9);
 
   await page.locator("#import-state").click();
   await page.locator("#file-picker").setInputFiles({
@@ -350,6 +367,8 @@ for (const [value, name] of [
     await expect(page.locator("#status")).toContainText("準備完了");
     await expect(page.locator("#screen")).toHaveAttribute("data-emulator-ready", "true");
     await expect(page.locator("#backend")).toContainText(name);
+    await page.locator("#audio").click();
+    await expect(page.locator("#audio")).toHaveText("音声有効");
     await page.locator("#diagnostic-rom").click();
     await expect(page.locator("#fdd0-name")).toHaveText("builtin-diagnostic.xdf");
     await expect(page.locator("#hdd0-name")).toHaveText("builtin-diagnostic.hdf");

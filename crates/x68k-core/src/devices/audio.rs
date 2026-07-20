@@ -22,6 +22,7 @@ struct Msm6258 {
 }
 
 impl Default for Msm6258 {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             playing: false,
@@ -37,6 +38,7 @@ impl Default for Msm6258 {
 }
 
 impl Msm6258 {
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     fn write(&mut self, offset: u32, value: u8) {
         match offset {
             1 if value & 1 != 0 => self.playing = false,
@@ -54,6 +56,7 @@ impl Msm6258 {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     fn read(&self, offset: u32) -> u8 {
         if offset == 1 {
             if self.playing { 0xc0 } else { 0x40 }
@@ -62,6 +65,7 @@ impl Msm6258 {
         }
     }
 
+    /// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
     fn decode(&mut self, nibble: u8) {
         const INDEX_SHIFT: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
         const STEP_SIZE: [i32; 49] = [
@@ -90,6 +94,7 @@ impl Msm6258 {
         self.decoded.push_back((self.predictor * 16) as i16);
     }
 
+    /// MSM6258 ADPCMの現在信号を1サンプル進めて返す。
     fn sample(&mut self, sample_rate: u32) -> (f32, f32) {
         const RATES: [f64; 8] = [
             7812.5, 10416.667, 15625.0, 10416.667, 3906.25, 5208.333, 7812.5, 5208.333,
@@ -134,14 +139,22 @@ struct AudioFrame {
 }
 
 impl AudioSystem {
+    /// 現在の状態や結果を利用者向けの診断情報として提示する。
     pub(crate) fn diagnostics(&self) -> (u64, u64, u8, u16) {
         self.ym2151.diagnostics()
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     pub(crate) fn read_ym(&self, offset: u32) -> u8 {
         self.ym2151.read(offset)
     }
 
+    /// YM2151タイマーIRQ出力が現在アサート中かを返す。
+    pub(crate) fn ym_irq_asserted(&self) -> bool {
+        self.ym2151.irq_asserted()
+    }
+
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     pub(crate) fn write_ym(&mut self, offset: u32, value: u8) {
         // data registerの効果をframe末尾のPCM全体へ遡及させない。address latch
         // 自体は無音なので、実際のregister write直前までを旧状態で生成する。
@@ -154,21 +167,25 @@ impl AudioSystem {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     pub(crate) fn read_adpcm(&self, offset: u32) -> u8 {
         self.msm6258.read(offset)
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     pub(crate) fn write_adpcm(&mut self, offset: u32, value: u8) {
         self.render_to_cursor();
         self.msm6258.write(offset, value);
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub(crate) fn set_pan(&mut self, value: u8) {
         self.render_to_cursor();
         self.msm6258.pan = value & 0x0f;
         self.msm6258.clock_select = (self.msm6258.clock_select & 4) | ((value >> 2) & 3);
     }
 
+    /// 経過CPUクロックをデバイス固有クロックへ変換し、タイマーと転送状態を進める。
     pub(crate) fn tick(&mut self, cycles: u32, cpu_clock: u32) -> bool {
         let irq = self.ym2151.tick(cycles, cpu_clock);
         if self.frame.active {
@@ -178,6 +195,7 @@ impl AudioSystem {
         irq
     }
 
+    /// フレーム単位の音声サンプル収集を初期化する。
     pub(crate) fn begin_frame(
         &mut self,
         cycle_budget: u32,
@@ -194,12 +212,14 @@ impl AudioSystem {
         self.frame.output.clear();
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub(crate) fn set_instruction_offset(&mut self, cycles: u32) {
         if self.frame.active {
             self.frame.instruction_offset = cycles;
         }
     }
 
+    /// 指定サンプル数のFM・ADPCMステレオPCMを生成する。
     pub(crate) fn generate(&mut self, frames: usize, sample_rate: u32, output: &mut Vec<f32>) {
         output.reserve(frames * 2);
         let start = output.len();
@@ -212,6 +232,7 @@ impl AudioSystem {
         }
     }
 
+    /// フレーム末端まで音声を生成し、ステレオPCMブロックを確定する。
     pub(crate) fn finish_frame(&mut self, frames: usize, sample_rate: u32, output: &mut Vec<f32>) {
         if !self.frame.active {
             self.generate(frames, sample_rate, output);
@@ -222,6 +243,7 @@ impl AudioSystem {
         self.frame = AudioFrame::default();
     }
 
+    /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
     fn render_to_cursor(&mut self) {
         if !self.frame.active {
             return;
@@ -236,6 +258,7 @@ impl AudioSystem {
         self.render_to_frame(target);
     }
 
+    /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
     fn render_to_frame(&mut self, target: usize) {
         let target = target.min(self.frame.sample_frames);
         let count = target.saturating_sub(self.frame.generated_frames);
@@ -253,11 +276,13 @@ impl AudioSystem {
 mod tests {
     use super::*;
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_ym(audio: &mut AudioSystem, register: u8, value: u8) {
         audio.write_ym(1, register);
         audio.write_ym(3, value);
     }
 
+    /// YM2151のキーオン値を対象チャンネルの各オペレータへ反映する。
     fn key_on_channel(audio: &mut AudioSystem, channel: u8, algorithm: u8) {
         write_ym(audio, 0x20 + channel, 0xc0 | algorithm);
         write_ym(audio, 0x28 + channel, 0x4c);
@@ -270,6 +295,7 @@ mod tests {
         write_ym(audio, 0x08, 0x78 | channel);
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     fn configure_single_carrier(audio: &mut AudioSystem, control: u8) {
         write_ym(audio, 0x20, control | 7);
         write_ym(audio, 0x28, 0x4c);
@@ -279,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_key_on_generates_stereo_pcm` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_key_on_generates_stereo_pcm() {
         let mut audio = AudioSystem::default();
         key_on_channel(&mut audio, 0, 7);
@@ -289,6 +316,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_rl_bits_route_left_and_right_in_chip_order` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_rl_bits_route_left_and_right_in_chip_order() {
         let mut audio = AudioSystem::default();
         configure_single_carrier(&mut audio, 0x80);
@@ -300,6 +328,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_zero_attack_rate_does_not_open_envelope` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_zero_attack_rate_does_not_open_envelope() {
         let mut audio = AudioSystem::default();
         write_ym(&mut audio, 0x20, 0xc7);
@@ -314,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    /// `frame_timeline_keeps_short_key_event_at_its_cycle_position` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn frame_timeline_keeps_short_key_event_at_its_cycle_position() {
         let mut audio = AudioSystem::default();
         configure_single_carrier(&mut audio, 0xc0);
@@ -331,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    /// `redistributable_ym_register_trace_is_deterministic` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn redistributable_ym_register_trace_is_deterministic() {
         #[derive(Deserialize)]
         struct RegisterWrite {
@@ -354,6 +385,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_native_trace_matches_ymfm_reference` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_native_trace_matches_ymfm_reference() {
         let mut audio = AudioSystem::default();
         for (register, value) in [(32, 199), (40, 76), (64, 1), (96, 0), (128, 31), (8, 120)] {
@@ -378,6 +410,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_complex_native_trace_matches_ymfm_hash` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_complex_native_trace_matches_ymfm_hash() {
         use sha2::{Digest, Sha256};
 
@@ -422,6 +455,7 @@ mod tests {
     }
 
     #[test]
+    /// `msm6258_decodes_nibbles_and_obeys_pan` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn msm6258_decodes_nibbles_and_obeys_pan() {
         let mut audio = AudioSystem::default();
         audio.set_pan(0);
@@ -435,6 +469,7 @@ mod tests {
     }
 
     #[test]
+    /// `msm6258_uses_the_chip_integer_difference_table` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn msm6258_uses_the_chip_integer_difference_table() {
         let mut chip = Msm6258::default();
         chip.decode(0x07);
@@ -444,6 +479,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_all_algorithms_stay_finite_under_feedback` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_all_algorithms_stay_finite_under_feedback() {
         for algorithm in 0..8 {
             let mut audio = AudioSystem::default();
@@ -457,6 +493,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_lfo_noise_detune_and_timer_registers_affect_output` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_lfo_noise_detune_and_timer_registers_affect_output() {
         let mut dry = AudioSystem::default();
         key_on_channel(&mut dry, 7, 7);
@@ -487,6 +524,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_operator_register_order_matches_opm_wiring` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_operator_register_order_matches_opm_wiring() {
         let mut chip = Ym2151::default();
         chip.write(1, 0x68);
@@ -498,6 +536,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_key_on_edge_resets_phase_without_retriggering_held_key` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_key_on_edge_resets_phase_without_retriggering_held_key() {
         let mut audio = AudioSystem::default();
         key_on_channel(&mut audio, 0, 7);
@@ -514,6 +553,7 @@ mod tests {
     }
 
     #[test]
+    /// `ym2151_pcm_does_not_depend_on_generate_block_size` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_pcm_does_not_depend_on_generate_block_size() {
         let mut whole = AudioSystem::default();
         key_on_channel(&mut whole, 0, 7);
@@ -528,6 +568,7 @@ mod tests {
 
     #[test]
     #[ignore = "manual real-time performance probe"]
+    /// `ym2151_ten_seconds_realtime_performance_probe` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn ym2151_ten_seconds_realtime_performance_probe() {
         let mut audio = AudioSystem::default();
         for channel in 0..8 {

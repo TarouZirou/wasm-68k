@@ -11,6 +11,7 @@ pub(crate) struct Video {
 }
 
 impl Default for Video {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self {
             palette_bytes: vec![0; 1024],
@@ -20,6 +21,7 @@ impl Default for Video {
 }
 
 impl Video {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&self, offset: u32) -> u8 {
         match offset {
             0..=0x3ff => self.palette_bytes[offset as usize],
@@ -30,6 +32,7 @@ impl Video {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(&mut self, offset: u32, value: u8) {
         match offset {
             0..=0x3ff => self.palette_bytes[offset as usize] = value,
@@ -40,19 +43,23 @@ impl Video {
         }
     }
 
+    /// グラフィックVRAM層が現在表示許可されているかを返す。
     pub(crate) fn graphics_enabled(&self) -> bool {
         self.registers[5] & 0x1f != 0
     }
 
+    /// テキストVRAM層が現在表示許可されているかを返す。
     pub(crate) fn text_enabled(&self) -> bool {
         self.registers[5] & 0x20 != 0
     }
 
+    /// スプライト/BG層が現在表示許可されているかを返す。
     pub(crate) fn sprites_enabled(&self) -> bool {
         self.registers[5] & 0x40 != 0
     }
 
     #[cfg(test)]
+    /// 現在のレジスタ値または入力から `graphic_pixel` に対応する描画・転送情報を算出して返す。
     fn graphic_pixel(
         &self,
         vram: &GraphicVram,
@@ -64,6 +71,7 @@ impl Video {
             .map(|sample| sample.0)
     }
 
+    /// グラフィックVRAMの画素値と特殊合成属性を現在の色モードに従って取得する。
     pub(crate) fn graphic_pixel_with_attributes(
         &self,
         vram: &GraphicVram,
@@ -78,10 +86,17 @@ impl Video {
         }
     }
 
+    /// 現在のレジスタ値または入力から `text_colour` に対応する描画・転送情報を算出して返す。
     pub(crate) fn text_colour(&self, index: u8) -> u16 {
         self.palette(256 + usize::from(index))
     }
 
+    /// 全表示layerが透明な画素へ出るgraphics palette 0（backdrop）。
+    pub(crate) fn backdrop_colour(&self) -> u16 {
+        self.palette(0)
+    }
+
+    /// 現在のレジスタ値または入力から `layer_priority` に対応する描画・転送情報を算出して返す。
     pub(crate) fn layer_priority(&self, layer: usize) -> u8 {
         let priority = match layer {
             0 => self.registers[2] & 3,
@@ -91,18 +106,22 @@ impl Video {
         priority.min(2)
     }
 
+    /// 半透明特殊合成が現在有効かを返す。
     pub(crate) fn half_transparency_enabled(&self) -> bool {
         self.registers[4] & 0x5d == 0x1c
     }
 
+    /// 特殊優先順位合成が現在有効かを返す。
     pub(crate) fn special_priority_enabled(&self) -> bool {
         self.registers[4] & 0x5c == 0x14
     }
 
+    /// `special_pixel` の条件が現在成立しているかを、副作用なく判定して返す。
     fn special_pixel(&self, index: u16) -> bool {
         (self.half_transparency_enabled() || self.special_priority_enabled()) && index & 1 != 0
     }
 
+    /// 16色モードのプレーン優先順位に従いグラフィック画素を合成する。
     fn pixel_16(
         &self,
         vram: &GraphicVram,
@@ -136,6 +155,7 @@ impl Video {
         })
     }
 
+    /// 256色モードのプレーン組合せからパレット番号を復元する。
     fn pixel_256(
         &self,
         vram: &GraphicVram,
@@ -181,6 +201,7 @@ impl Video {
         })
     }
 
+    /// 65536色モードの4プレーンから16bit GRBi画素を復元する。
     fn pixel_65536(
         &self,
         vram: &GraphicVram,
@@ -199,6 +220,7 @@ impl Video {
         })
     }
 
+    /// 現在のレジスタ値または入力から `palette` に対応する描画・転送情報を算出して返す。
     fn palette(&self, index: usize) -> u16 {
         let offset = index * 2;
         u16::from_be_bytes([self.palette_bytes[offset], self.palette_bytes[offset + 1]])
@@ -210,6 +232,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `palette_and_direct_colour_modes_emit_grbi` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn palette_and_direct_colour_modes_emit_grbi() {
         let mut video = Video::default();
         let mut vram = GraphicVram::default();
@@ -223,6 +246,16 @@ mod tests {
     }
 
     #[test]
+    /// `graphics_palette_zero_is_the_backdrop_colour` が想定する振る舞いを満たし、回帰がないことを検証する。
+    fn graphics_palette_zero_is_the_backdrop_colour() {
+        let mut video = Video::default();
+        video.write(0, 0x68);
+        video.write(1, 0x4e);
+        assert_eq!(video.backdrop_colour(), 0x684e);
+    }
+
+    #[test]
+    /// `mode_256_combines_nibbles_from_each_page_byte` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn mode_256_combines_nibbles_from_each_page_byte() {
         let mut video = Video::default();
         let mut vram = GraphicVram::default();
@@ -237,6 +270,7 @@ mod tests {
     }
 
     #[test]
+    /// `layer_priority_three_is_same_as_lowest_priority_two` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn layer_priority_three_is_same_as_lowest_priority_two() {
         let mut video = Video::default();
         video.write(0x500, 0x3b);
@@ -246,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    /// `special_modes_only_mark_pixels_with_low_bit_set` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn special_modes_only_mark_pixels_with_low_bit_set() {
         let mut video = Video::default();
         let mut vram = GraphicVram::default();

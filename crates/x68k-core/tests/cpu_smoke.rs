@@ -11,15 +11,18 @@ struct FlatMem {
 }
 
 impl FlatMem {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     fn new(size: usize) -> Self {
         Self { mem: vec![0; size] }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_word_at(&mut self, addr: u32, value: u16) {
         self.write_byte(addr, (value >> 8) as u8);
         self.write_byte(addr + 1, value as u8);
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_long_at(&mut self, addr: u32, value: u32) {
         self.write_word_at(addr, (value >> 16) as u16);
         self.write_word_at(addr + 2, value as u16);
@@ -27,32 +30,38 @@ impl FlatMem {
 }
 
 impl AddressBus for FlatMem {
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_byte(&mut self, address: u32) -> u8 {
         self.mem[(address as usize) % self.mem.len()]
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_word(&mut self, address: u32) -> u16 {
         let hi = self.read_byte(address);
         let lo = self.read_byte(address.wrapping_add(1));
         u16::from_be_bytes([hi, lo])
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_long(&mut self, address: u32) -> u32 {
         let hi = u32::from(self.read_word(address));
         let lo = u32::from(self.read_word(address.wrapping_add(2)));
         (hi << 16) | lo
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_byte(&mut self, address: u32, value: u8) {
         let len = self.mem.len();
         self.mem[(address as usize) % len] = value;
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_word(&mut self, address: u32, value: u16) {
         self.write_byte(address, (value >> 8) as u8);
         self.write_byte(address.wrapping_add(1), value as u8);
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_long(&mut self, address: u32, value: u32) {
         self.write_word(address, (value >> 16) as u16);
         self.write_word(address.wrapping_add(2), value as u16);
@@ -60,6 +69,7 @@ impl AddressBus for FlatMem {
 }
 
 #[test]
+/// `reset_loads_vectors` が想定する振る舞いを満たし、回帰がないことを検証する。
 fn reset_loads_vectors() {
     let mut mem = FlatMem::new(0x2000);
     mem.write_long_at(0x0000, 0x0000_1800); // 初期 SSP
@@ -73,6 +83,7 @@ fn reset_loads_vectors() {
 }
 
 #[test]
+/// `executes_arithmetic_program` が想定する振る舞いを満たし、回帰がないことを検証する。
 fn executes_arithmetic_program() {
     let mut mem = FlatMem::new(0x2000);
     mem.write_long_at(0x0000, 0x0000_1800);
@@ -98,6 +109,7 @@ fn executes_arithmetic_program() {
 }
 
 #[test]
+/// `executes_human68k_style_bsr_word` が想定する振る舞いを満たし、回帰がないことを検証する。
 fn executes_human68k_style_bsr_word() {
     let mut mem = FlatMem::new(0x1_0000);
     mem.write_long_at(0x0000, 0x0000_f000);

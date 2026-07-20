@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use x68k_core::{DriveId, InputEvent, Machine, MachineConfig, MachineModel, MediaFormat, RomKind};
 
+/// アプリケーションを初期化し、実行に必要な各コンポーネントを起動する。
 fn main() {
     let mut arguments = std::env::args().skip(1);
     let profile = arguments.next().unwrap_or_else(|| "x68000".to_string());
@@ -40,6 +41,9 @@ fn main() {
         ..MachineConfig::default()
     })
     .expect("machine");
+    if std::env::var_os("X68K_NO_AUDIO_OUTPUT").is_some() {
+        machine.set_audio_output_enabled(false);
+    }
     machine.set_cpu_trap_diagnostics(std::env::var_os("X68K_TRACE_TRAPS").is_some());
     let cgrom_path = std::env::var_os("X68K_CGROM")
         .map(PathBuf::from)
@@ -70,6 +74,11 @@ fn main() {
         println!("FDD0 is empty");
     }
     machine.load_rom(RomKind::Ipl, &ipl).expect("load IPL");
+    if let Some(path) = std::env::var_os("X68K_LOAD_STATE") {
+        let state = fs::read(&path).expect("saved state");
+        machine.load_state(&state).expect("load saved state");
+        println!("loaded_state={}", PathBuf::from(path).display());
+    }
 
     let (initial_pc, initial_sr, _, initial_sp, _) = machine.cpu_diagnostics();
     println!(
@@ -320,8 +329,13 @@ fn main() {
     if let Some((pc, opcode, kind)) = machine.cpu_trap_diagnostics() {
         println!("last_cpu_trap kind={kind} pc={pc:08x} opcode={opcode:04x}");
     }
+    if let Some(path) = std::env::var_os("X68K_SAVE_STATE") {
+        fs::write(&path, machine.save_state().expect("save state")).expect("write saved state");
+        println!("saved_state={}", PathBuf::from(path).display());
+    }
 }
 
+/// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
 fn write_pcm_wav(path: PathBuf, sample_rate: u32, samples: &[i16]) {
     let data_size = u32::try_from(samples.len() * 2).expect("WAV data fits u32");
     let mut wav = Vec::with_capacity(44 + data_size as usize);

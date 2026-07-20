@@ -22,6 +22,7 @@ pub(crate) struct MidiBoard {
 }
 
 impl MidiBoard {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&mut self, offset: u32) -> u8 {
         match offset & 0x0f {
             0x01 => {
@@ -39,6 +40,7 @@ impl MidiBoard {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(&mut self, offset: u32, value: u8) {
         match offset & 0x0f {
             0x03 => {
@@ -79,6 +81,7 @@ impl MidiBoard {
         }
     }
 
+    /// 経過CPUクロックをデバイス固有クロックへ変換し、タイマーと転送状態を進める。
     pub(crate) fn tick(&mut self, cycles: u32, clock_hz: u32) {
         self.transmit_cycles = self.transmit_cycles.saturating_add(cycles);
         let byte_cycles = (clock_hz / 3_125).max(1);
@@ -112,24 +115,29 @@ impl MidiBoard {
         }
     }
 
+    /// `interrupt_pending` の条件が現在成立しているかを、副作用なく判定して返す。
     pub(crate) fn interrupt_pending(&self) -> bool {
         self.interrupt_pending
     }
 
+    /// 割り込み状態を更新し、CPUと周辺機器のハンドシェイクを進める。
     pub(crate) fn acknowledge(&mut self) -> u8 {
         self.interrupt_pending = false;
         self.vector | self.interrupt_vector
     }
 
+    /// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
     pub(crate) fn drain(&mut self) -> Vec<u8> {
         self.output.drain(..).collect()
     }
 
+    /// 指定したMFP割り込み源を有効化状態に従って保留キューへ追加する。
     fn raise(&mut self, vector: u8) {
         self.interrupt_vector = vector;
         self.interrupt_pending = true;
     }
 
+    /// 内部状態をリセットし、関連する周辺機器を起動直後の状態へ戻す。
     fn reset(&mut self) {
         let output = std::mem::take(&mut self.output);
         *self = Self::default();
@@ -142,6 +150,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `bytes_leave_fifo_at_midi_baud_rate` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn bytes_leave_fifo_at_midi_baud_rate() {
         let mut midi = MidiBoard::default();
         midi.write(3, 5);

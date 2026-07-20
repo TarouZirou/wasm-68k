@@ -11,6 +11,7 @@ export function createDiagnosticIpl(model: DiagnosticModel): Uint8Array {
   view.setUint32(0x10_004, 0x00fe_0010, false);
   const program: number[] = [];
 
+  /** 診断IPLへMOVE.B即値書込み命令を追記する。 */
   const moveByteImmediate = (value: number, address: number): void => {
     program.push(0x13, 0xfc, 0x00, value & 0xff);
     program.push(
@@ -20,6 +21,7 @@ export function createDiagnosticIpl(model: DiagnosticModel): Uint8Array {
       address & 0xff,
     );
   };
+  /** 診断IPLへMOVE.W即値書込み命令を追記する。 */
   const moveWordImmediate = (value: number, address: number): void => {
     program.push(0x33, 0xfc, (value >>> 8) & 0xff, value & 0xff);
     program.push(
@@ -29,6 +31,7 @@ export function createDiagnosticIpl(model: DiagnosticModel): Uint8Array {
       address & 0xff,
     );
   };
+  /** 診断IPLへMOVE.L即値書込み命令を追記する。 */
   const moveLongImmediate = (value: number, address: number): void => {
     program.push(
       0x23, 0xfc,
@@ -148,6 +151,7 @@ export function createDiagnosticIpl(model: DiagnosticModel): Uint8Array {
     0x13, 0xfc, 0x00, 0x80, 0x00, 0xe2, 0x00, 0x00,
     0x4e, 0x72, 0x27, 0x00, 0x60, 0xfa,
   ], 0x0800);
+  /** 例外種別を画面色で示してCPUを停止する診断コードを生成する。 */
   const exceptionStop = (colour: number): number[] => [
     0x33, 0xfc, (colour >>> 8) & 0xff, colour & 0xff, 0x00, 0xc0, 0x00, 0x00,
     0x4e, 0x72, 0x27, 0x00, 0x60, 0xfa,

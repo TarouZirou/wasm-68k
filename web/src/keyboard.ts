@@ -38,12 +38,14 @@ export const defaultKeyMap: Readonly<Record<string, number>> = {
 export class PressedKeyState {
   private readonly byHostCode = new Map<string, number>();
 
+  /** 入力イベントを処理し、対応するエミュレータ状態と外部出力を更新する。 */
   press(hostCode: string, keyMap: Readonly<Record<string, number>>): number | undefined {
     const scancode = this.byHostCode.get(hostCode) ?? keyMap[hostCode];
     if (scancode !== undefined) this.byHostCode.set(hostCode, scancode);
     return scancode;
   }
 
+  /** `release` の条件が現在成立しているかを、副作用なく判定して返す。 */
   release(hostCode: string): { scancode: number; sendBreak: boolean } | undefined {
     const scancode = this.byHostCode.get(hostCode);
     if (scancode === undefined) return undefined;
@@ -54,6 +56,7 @@ export class PressedKeyState {
     return { scancode, sendBreak: true };
   }
 
+  /** 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。 */
   drain(): number[] {
     const scancodes = [...new Set(this.byHostCode.values())];
     this.byHostCode.clear();
@@ -61,15 +64,18 @@ export class PressedKeyState {
   }
 }
 
+/** 保存値が有効なキーマップ辞書かを検証する。 */
 export function isKeyMap(value: unknown): value is Record<string, number> {
   return typeof value === "object" && value !== null && !Array.isArray(value) &&
     Object.values(value).every((scan) => Number.isInteger(scan) && scan >= 0 && scan <= 0x7f);
 }
 
+/** 現在の状態を外部で扱える形式へ変換して出力する。 */
 export function encodeKeyMap(keyMap: Record<string, number>): Uint8Array {
   return new TextEncoder().encode(JSON.stringify({ version: KEYMAP_VERSION, keyMap }));
 }
 
+/** `decodeKeyMap` の条件が現在成立しているかを、副作用なく判定して返す。 */
 export function decodeKeyMap(value: unknown): { keyMap: Record<string, number>; migrated: boolean } {
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     const stored = value as Partial<{ version: unknown; keyMap: unknown }>;

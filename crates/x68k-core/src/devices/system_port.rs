@@ -15,6 +15,7 @@ pub(crate) struct SystemPort {
 }
 
 impl SystemPort {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     pub(crate) fn new(model: MachineModel) -> Self {
         Self {
             contrast: 0,
@@ -30,6 +31,7 @@ impl SystemPort {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&self, offset: u32) -> u8 {
         if offset & 1 == 0 {
             return 0xff;
@@ -44,6 +46,7 @@ impl SystemPort {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(&mut self, offset: u32, value: u8) -> Option<bool> {
         if offset & 1 == 0 {
             return None;
@@ -62,6 +65,7 @@ impl SystemPort {
         None
     }
 
+    /// 機種・アドレス・アクセス幅に対応する追加バスクロック数を返す。
     pub(crate) fn memory_wait(&self, rom: bool) -> u32 {
         u32::from(if rom { self.rom_wait } else { self.ram_wait })
     }
@@ -77,6 +81,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// `model_and_x68030_wait_port_match_machine_profile` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn model_and_x68030_wait_port_match_machine_profile() {
         let mut port = SystemPort::new(MachineModel::X68030);
         assert_eq!(port.read(0x0b), 0xdc);
@@ -87,6 +92,7 @@ mod tests {
     }
 
     #[test]
+    /// `keyboard_control_gates_transmission` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn keyboard_control_gates_transmission() {
         let mut port = SystemPort::new(MachineModel::X68000);
         assert!(port.keyboard_enabled());

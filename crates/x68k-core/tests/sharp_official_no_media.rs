@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use x68k_core::{Machine, MachineConfig, RomKind};
 
 #[test]
+/// `nine_mib_x68000_reaches_the_ipl_no_boot_disk_path` が想定する振る舞いを満たし、回帰がないことを検証する。
 fn nine_mib_x68000_reaches_the_ipl_no_boot_disk_path() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let ipl = fs::read(root.join("web/public/sharp/IPLROM.DAT")).expect("official IPL fixture");

@@ -42,6 +42,7 @@ struct Spc {
 }
 
 impl Default for Spc {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         let mut registers = [0; 16];
         registers[1] = 0x80; // SCTL reset and disable
@@ -73,6 +74,7 @@ pub(crate) struct Hdc {
 }
 
 impl Hdc {
+    /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     pub(crate) fn read(&mut self, offset: u32, media: &BTreeMap<DriveId, MediaImage>) -> u8 {
         match offset & 7 {
             1 => self.read_data(media),
@@ -81,6 +83,7 @@ impl Hdc {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     pub(crate) fn write(
         &mut self,
         offset: u32,
@@ -102,14 +105,17 @@ impl Hdc {
         }
     }
 
+    /// `interrupt_pending` の条件が現在成立しているかを、副作用なく判定して返す。
     pub(crate) fn interrupt_pending(&self) -> bool {
         self.interrupt || self.spc.registers[1] & 1 != 0 && self.spc.registers[4] != 0
     }
 
+    /// 割り込み状態を更新し、CPUと周辺機器のハンドシェイクを進める。
     pub(crate) fn acknowledge(&mut self) {
         self.interrupt = false;
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     pub(crate) fn read_spc(&mut self, offset: u32, media: &BTreeMap<DriveId, MediaImage>) -> u8 {
         if offset & 1 == 0 {
             return 0xff;
@@ -136,6 +142,7 @@ impl Hdc {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     pub(crate) fn write_spc(
         &mut self,
         offset: u32,
@@ -178,6 +185,7 @@ impl Hdc {
         }
     }
 
+    /// MB89352へ与えられたコマンドを解釈し、SCSIフェーズ遷移を開始する。
     fn spc_command(&mut self, value: u8, media: &mut BTreeMap<DriveId, MediaImage>) {
         self.spc.registers[2] = value;
         match value & 0xe0 {
@@ -211,6 +219,7 @@ impl Hdc {
         let _ = media;
     }
 
+    /// 現在のSCSIバスフェーズをMB89352 PSNSレジスタ形式で返す。
     fn spc_psns(&self) -> u8 {
         if !self.spc.connected {
             return 0;
@@ -225,6 +234,7 @@ impl Hdc {
         }
     }
 
+    /// SCSI Data Inフェーズの次のバイトを媒体から読み取る。
     fn spc_read_data(&mut self, media: &BTreeMap<DriveId, MediaImage>) -> u8 {
         if !self.spc.transfer_active
             || !matches!(self.phase, Phase::DataIn | Phase::Status | Phase::Message)
@@ -237,6 +247,7 @@ impl Hdc {
         value
     }
 
+    /// SCSI Data Outフェーズのバイトを媒体オーバーレイへ書き込む。
     fn spc_write_data(&mut self, value: u8, media: &mut BTreeMap<DriveId, MediaImage>) {
         self.spc.registers[10] = value;
         if !self.spc.transfer_active || !matches!(self.phase, Phase::Command | Phase::DataOut) {
@@ -246,6 +257,7 @@ impl Hdc {
         self.spc_advance_transfer();
     }
 
+    /// SCSI転送の残量とフェーズを更新し、完了時は次フェーズへ移る。
     fn spc_advance_transfer(&mut self) {
         self.spc.transfer_count = self.spc.transfer_count.saturating_sub(1);
         if self.spc.transfer_count == 0 {
@@ -256,15 +268,18 @@ impl Hdc {
         }
     }
 
+    /// SCSI転送を完了し、状態・IRQ・フェーズを確定する。
     fn spc_finish_transfer(&mut self) {
         self.spc.transfer_active = false;
         self.spc.registers[4] |= 0x10;
     }
 
+    /// 内部状態をリセットし、関連する周辺機器を起動直後の状態へ戻す。
     fn reset(&mut self) {
         *self = Self::default();
     }
 
+    /// 現在のSASIバスフェーズと信号線をホストが読むステータス値へ変換する。
     fn bus_status(&self) -> u8 {
         let mut status = 0;
         if self.phase != Phase::BusFree {
@@ -288,6 +303,7 @@ impl Hdc {
         status
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_data(&mut self, media: &BTreeMap<DriveId, MediaImage>) -> u8 {
         match self.phase {
             Phase::DataIn => {
@@ -313,6 +329,7 @@ impl Hdc {
         }
     }
 
+    /// 対象のメモリまたはレジスタへ値を書き込み、必要な副作用を反映する。
     fn write_data(&mut self, value: u8, media: &mut BTreeMap<DriveId, MediaImage>) {
         match self.phase {
             Phase::Command => {
@@ -332,6 +349,7 @@ impl Hdc {
         }
     }
 
+    /// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
     fn execute_command(&mut self, media: &mut BTreeMap<DriveId, MediaImage>) {
         self.status = 0;
         self.interrupt = false;
@@ -439,6 +457,7 @@ impl Hdc {
         }
     }
 
+    /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     fn read_blocks(&mut self, media: &BTreeMap<DriveId, MediaImage>, lba: u32, blocks: u32) {
         let Some(image) = self.selected_media(media) else {
             self.fail(0x02, 0x3a);
@@ -473,6 +492,7 @@ impl Hdc {
         }
     }
 
+    /// `commit_write` に必要な状態遷移を実行し、関連するデバイスと入出力を更新する。
     fn commit_write(&mut self, media: &mut BTreeMap<DriveId, MediaImage>) {
         let block_size = self.block_size();
         let Some(start) = (self.write_lba as usize).checked_mul(block_size) else {
@@ -506,6 +526,7 @@ impl Hdc {
         }
     }
 
+    /// 対象機能の実行状態を切り替え、関連リソースを整合させる。
     fn start_data_in(&mut self, bytes: Vec<u8>) {
         self.data = bytes.into();
         self.phase = if self.data.is_empty() {
@@ -516,12 +537,14 @@ impl Hdc {
         self.interrupt = self.phase == Phase::Status;
     }
 
+    /// `finish_ok` に対応する完了またはエラー状態を構築し、関連する要求線とIRQを更新する。
     fn finish_ok(&mut self) {
         self.status = 0;
         self.phase = Phase::Status;
         self.interrupt = true;
     }
 
+    /// `fail` に対応する完了またはエラー状態を構築し、関連する要求線とIRQを更新する。
     fn fail(&mut self, key: u8, code: u8) {
         self.status = 0x02;
         self.sense_key = key;
@@ -530,10 +553,12 @@ impl Hdc {
         self.interrupt = true;
     }
 
+    /// 現在の状態または入力から `drive` に対応する値を算出し、副作用なく返す。
     fn drive(&self) -> DriveId {
         DriveId::HardDisk(self.target)
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     fn selected_media<'a>(
         &self,
         media: &'a BTreeMap<DriveId, MediaImage>,
@@ -546,6 +571,7 @@ impl Hdc {
             .filter(|image| image.format == MediaFormat::Hdf)
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     fn selected_media_mut<'a>(
         &self,
         media: &'a mut BTreeMap<DriveId, MediaImage>,
@@ -558,10 +584,12 @@ impl Hdc {
             .filter(|image| image.format == MediaFormat::Hdf)
     }
 
+    /// `has_media` の条件が現在成立しているかを、副作用なく判定して返す。
     fn has_media(&self, media: &BTreeMap<DriveId, MediaImage>) -> bool {
         self.selected_media(media).is_some()
     }
 
+    /// 現在のレジスタ値または入力から `block_size` に対応する描画・転送情報を算出して返す。
     fn block_size(&self) -> usize {
         match self.interface {
             Interface::Sasi => SASI_BLOCK_SIZE,
@@ -570,6 +598,7 @@ impl Hdc {
     }
 }
 
+/// FDCコマンド種別から必要なパラメータ数を返す。
 fn command_length(opcode: u8) -> usize {
     match opcode >> 5 {
         0 => 6,
@@ -579,6 +608,7 @@ fn command_length(opcode: u8) -> usize {
     }
 }
 
+/// 現在のレジスタ値または入力から `command_range` に対応する描画・転送情報を算出して返す。
 fn command_range(command: &[u8]) -> (u32, u32) {
     if command.len() >= 10 {
         let lba = u32::from_be_bytes([command[2], command[3], command[4], command[5]]);
@@ -601,12 +631,14 @@ fn command_range(command: &[u8]) -> (u32, u32) {
 mod tests {
     use super::*;
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     fn select(hdc: &mut Hdc, media: &mut BTreeMap<DriveId, MediaImage>) {
         hdc.write(7, 1, media);
         hdc.write(3, 0, media);
     }
 
     #[test]
+    /// `sasi_read_and_write_use_overlay` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn sasi_read_and_write_use_overlay() {
         let mut media = BTreeMap::new();
         media.insert(
@@ -639,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    /// `scsi_inquiry_and_capacity` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn scsi_inquiry_and_capacity() {
         let mut media = BTreeMap::new();
         media.insert(
@@ -655,6 +688,7 @@ mod tests {
     }
 
     #[test]
+    /// `scsi_capacity_mode_sense_and_read_use_512_byte_blocks` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn scsi_capacity_mode_sense_and_read_use_512_byte_blocks() {
         let mut image = vec![0; SCSI_BLOCK_SIZE * 4];
         image[SCSI_BLOCK_SIZE] = 0x7b;
@@ -702,6 +736,7 @@ mod tests {
     }
 
     #[test]
+    /// `scsi_target_maps_one_to_one_to_public_hard_disk_id` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn scsi_target_maps_one_to_one_to_public_hard_disk_id() {
         let mut media = BTreeMap::from([(
             DriveId::HardDisk(1),
@@ -717,6 +752,7 @@ mod tests {
     }
 
     #[test]
+    /// `malformed_large_cdb_range_returns_check_condition_without_panicking` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn malformed_large_cdb_range_returns_check_condition_without_panicking() {
         let mut media = BTreeMap::from([(
             DriveId::HardDisk(0),
@@ -734,6 +770,7 @@ mod tests {
         assert_eq!(hdc.read(1, &media), 0); // MESSAGE IN
     }
 
+    /// MB89352の転送要求を現在のSCSIフェーズに従って進める。
     fn spc_transfer(
         hdc: &mut Hdc,
         media: &mut BTreeMap<DriveId, MediaImage>,
@@ -748,6 +785,7 @@ mod tests {
     }
 
     #[test]
+    /// `mb89352_program_transfer_runs_scsi_command_phases` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn mb89352_program_transfer_runs_scsi_command_phases() {
         let mut media = BTreeMap::from([(
             DriveId::HardDisk(0),
@@ -779,6 +817,7 @@ mod tests {
     }
 
     #[test]
+    /// `mb89352_transfer_count_middle_byte_can_be_reprogrammed` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn mb89352_transfer_count_middle_byte_can_be_reprogrammed() {
         let mut hdc = Hdc::default();
         let mut media = BTreeMap::new();

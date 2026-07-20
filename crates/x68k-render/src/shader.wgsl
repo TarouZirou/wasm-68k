@@ -7,6 +7,7 @@ struct VsOut {
 };
 
 @vertex
+// フルスクリーン三角形の頂点位置とテクスチャ座標を生成する。
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
     // 画面全体を覆う三角形 (fullscreen triangle)
     var positions = array<vec2<f32>, 3>(
@@ -33,6 +34,7 @@ var frame_tex: texture_2d<u32>;
 @group(0) @binding(1)
 var<uniform> crt: vec4<f32>;
 
+// X68000 の 16bit GRBi ピクセルを、表示用の 8bit RGB へ変換する。
 fn grbi_to_rgb8(pixel: u32) -> vec3<u32> {
     let i = pixel & 1u;
     let g6 = ((pixel >> 10u) & 0x3eu) | i;
@@ -45,6 +47,7 @@ fn grbi_to_rgb8(pixel: u32) -> vec3<u32> {
 }
 
 @fragment
+// フレームバッファを読み、任意の CRT 効果を適用して最終色を出力する。
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dims = textureDimensions(frame_tex);
     let centered = in.uv * 2.0 - vec2<f32>(1.0);

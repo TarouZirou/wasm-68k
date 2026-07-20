@@ -30,6 +30,7 @@ pub struct Machine {
     frame_count: u64,
     paused: bool,
     video_options: VideoOptions,
+    audio_output_enabled: bool,
     trace_cpu_traps: bool,
     last_cpu_trap: Option<(u32, u16, &'static str)>,
 }
@@ -38,29 +39,46 @@ struct TrapRecorder<'a> {
     last: &'a mut Option<(u32, u16, &'static str)>,
 }
 
+impl TrapRecorder<'_> {
+    /// 新しいバス障害を診断履歴へ追加し、最初と最後の障害を保持する。
+    fn record(&mut self, cpu: &CpuCore, opcode: u16, kind: &'static str) {
+        *self.last = Some((cpu.ppc, opcode, kind));
+    }
+}
+
 impl HleHandler for TrapRecorder<'_> {
+    /// `handle_aline` の条件が現在成立しているかを、副作用なく判定して返す。
     fn handle_aline(&mut self, cpu: &mut CpuCore, _bus: &mut dyn AddressBus, opcode: u16) -> bool {
-        *self.last = Some((cpu.ppc, opcode, "A-line"));
+        self.record(cpu, opcode, "A-line");
         false
     }
 
+    /// `handle_fline` の条件が現在成立しているかを、副作用なく判定して返す。
     fn handle_fline(&mut self, cpu: &mut CpuCore, _bus: &mut dyn AddressBus, opcode: u16) -> bool {
-        *self.last = Some((cpu.ppc, opcode, "F-line"));
+        self.record(cpu, opcode, "F-line");
         false
     }
 
+    /// `handle_trap` の条件が現在成立しているかを、副作用なく判定して返す。
+    fn handle_trap(&mut self, cpu: &mut CpuCore, _bus: &mut dyn AddressBus, trap_num: u8) -> bool {
+        self.record(cpu, 0x4e40 | u16::from(trap_num), "TRAP");
+        false
+    }
+
+    /// 入力イベントを処理し、対応するエミュレータ状態と外部出力を更新する。
     fn handle_illegal(
         &mut self,
         cpu: &mut CpuCore,
         _bus: &mut dyn AddressBus,
         opcode: u16,
     ) -> bool {
-        *self.last = Some((cpu.ppc, opcode, "illegal"));
+        self.record(cpu, opcode, "illegal");
         false
     }
 }
 
 impl Machine {
+    /// 必要な初期値と依存オブジェクトを設定し、利用可能なインスタンスを構築する。
     pub fn new(mut config: MachineConfig) -> Result<Self, MachineError> {
         if !(MIB..=12 * MIB).contains(&config.ram_bytes) {
             return Err(MachineError::InvalidRamSize(config.ram_bytes));
@@ -85,23 +103,28 @@ impl Machine {
             frame_count: 0,
             paused: false,
             video_options: VideoOptions::default(),
+            audio_output_enabled: true,
             trace_cpu_traps: false,
             last_cpu_trap: None,
         })
     }
 
+    /// 動作中の機種・クロック・メモリ構成を参照として返す。
     pub fn config(&self) -> &MachineConfig {
         &self.config
     }
 
+    /// 現在のGRBiフレームバッファを参照として返す。
     pub fn framebuffer(&self) -> &[u16] {
         &self.framebuffer[..(self.width * self.height) as usize]
     }
 
+    /// 現在のCRTC論理解像度を幅と高さの組で返す。
     pub fn screen_dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
+    /// 起動後に完了したエミュレーションフレーム数を返す。
     pub fn frame_count(&self) -> u64 {
         self.frame_count
     }
@@ -122,27 +145,33 @@ impl Machine {
         )
     }
 
+    /// `bus_fault_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn bus_fault_diagnostics(&self) -> (Option<u32>, Option<u32>, u64) {
         self.bus.fault_diagnostics()
     }
 
+    /// `fdc_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn fdc_diagnostics(&self) -> (u64, u64, u8, u8, usize) {
         self.bus.fdc_diagnostics()
     }
 
     #[doc(hidden)]
+    /// `audio_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn audio_diagnostics(&self) -> (u64, u64, u8, u16) {
         self.bus.audio_diagnostics()
     }
 
+    /// 現在の状態または入力から `fdc_result_status` に対応する値を算出し、副作用なく返す。
     pub fn fdc_result_status(&self) -> [u8; 3] {
         self.bus.fdc_result_status()
     }
 
+    /// 現在の状態または入力から `fdc_command_parameters` に対応する値を算出し、副作用なく返す。
     pub fn fdc_command_parameters(&self) -> [u8; 8] {
         self.bus.fdc_command_parameters()
     }
 
+    /// `dma_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn dma_diagnostics(&self, channel: usize) -> (u8, u8, u8, u8, u16, u32, u32) {
         self.bus.dma_diagnostics(channel)
     }
@@ -154,21 +183,31 @@ impl Machine {
     }
 
     #[doc(hidden)]
+    /// `sprite_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn sprite_diagnostics(&self) -> Vec<(u8, u16, u16, u16, u8)> {
         self.bus.sprite_diagnostics()
     }
 
     #[doc(hidden)]
+    /// `mouse_buttons_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
+    pub fn mouse_buttons_diagnostics(&self) -> u8 {
+        self.bus.mouse_buttons_diagnostics()
+    }
+
+    #[doc(hidden)]
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub fn set_cpu_trap_diagnostics(&mut self, enabled: bool) {
         self.trace_cpu_traps = enabled;
         self.last_cpu_trap = None;
     }
 
     #[doc(hidden)]
+    /// `cpu_trap_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn cpu_trap_diagnostics(&self) -> Option<(u32, u16, &'static str)> {
         self.last_cpu_trap
     }
 
+    /// `ioc_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn ioc_diagnostics(&self) -> (u8, u8, u8, u8, u32, u64, u64) {
         self.bus.ioc_diagnostics()
     }
@@ -178,6 +217,7 @@ impl Machine {
         self.bus.content_hashes()
     }
 
+    /// `framebuffer_hash` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn framebuffer_hash(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         for pixel in self.framebuffer() {
@@ -186,6 +226,7 @@ impl Machine {
         hash.finalize().into()
     }
 
+    /// 入力データを検証して読み込み、対応する実行状態へ反映する。
     pub fn load_rom(&mut self, kind: RomKind, bytes: &[u8]) -> Result<(), MachineError> {
         match kind {
             RomKind::Ipl if !matches!(bytes.len(), 0x20_000 | 0x40_000) => {
@@ -237,6 +278,7 @@ impl Machine {
         Ok(())
     }
 
+    /// 媒体を検証して対象ドライブへ装着し、アクセス可能な状態にする。
     pub fn mount_media(
         &mut self,
         drive: DriveId,
@@ -261,6 +303,7 @@ impl Machine {
         Ok(())
     }
 
+    /// 対象を切り離し、保持していた媒体または入出力状態を更新する。
     pub fn eject_media(&mut self, drive: DriveId) -> Result<Vec<u8>, MachineError> {
         validate_drive(drive)?;
         let media = self
@@ -273,6 +316,7 @@ impl Machine {
         Ok(media)
     }
 
+    /// 現在の状態を外部で扱える形式へ変換して出力する。
     pub fn export_media(&self, drive: DriveId) -> Result<Vec<u8>, MachineError> {
         validate_drive(drive)?;
         self.bus
@@ -317,6 +361,7 @@ impl Machine {
             })
     }
 
+    /// 内部状態をリセットし、関連する周辺機器を起動直後の状態へ戻す。
     pub fn reset(&mut self) {
         self.cpu = CpuCore::new();
         self.cpu.set_cpu_type(cpu_type(self.config.model));
@@ -337,14 +382,26 @@ impl Machine {
         self.framebuffer.fill(0);
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
     }
 
+    /// PCM出力だけを停止する。YM2151/MSM6258のregister、timer、IRQは進めるため、
+    /// 再有効化してもguest側の音源driver状態は変わらない。
+    pub fn set_audio_output_enabled(&mut self, enabled: bool) {
+        self.audio_output_enabled = enabled;
+        if !enabled {
+            self.audio.clear();
+        }
+    }
+
+    /// `is_paused` の条件が現在成立しているかを、副作用なく判定して返す。
     pub fn is_paused(&self) -> bool {
         self.paused
     }
 
+    /// ホスト入力を機種固有のキーボード・マウス・PPI経路へ配送する。
     pub fn input(&mut self, event: InputEvent) {
         self.bus.input(event);
     }
@@ -371,6 +428,7 @@ impl Machine {
         (pc, opcode, self.cpu.sp(), self.cpu.get_sr(), cycles + wait)
     }
 
+    /// 指定された時間またはクロック分だけ状態機械を進め、発生した事象を処理する。
     pub fn run_frame(&mut self) -> FrameResult {
         // `audio` is a pending FIFO and may contain samples from earlier
         // frames when the host does not drain it immediately.  Keep the
@@ -380,12 +438,18 @@ impl Machine {
         if !self.paused {
             let numerator = self.audio_remainder + self.config.sample_rate;
             let audio_frames = (numerator / 60) as usize;
+            let output_audio_frames = if self.audio_output_enabled {
+                audio_frames
+            } else {
+                0
+            };
             self.audio_remainder = numerator % 60;
             if !self.bus.ipl.is_empty() {
                 let cycle_numerator = self.cycle_remainder + self.config.model.clock_hz();
                 let frame_budget = cycle_numerator / 60;
                 self.cycle_remainder = cycle_numerator % 60;
-                self.bus.begin_audio_frame(frame_budget, audio_frames);
+                self.bus
+                    .begin_audio_frame(frame_budget, output_audio_frames);
                 let mut remaining = frame_budget.saturating_sub(self.cpu_cycle_debt);
                 self.cpu_cycle_debt = self.cpu_cycle_debt.saturating_sub(frame_budget);
                 while remaining > 0 {
@@ -400,10 +464,8 @@ impl Machine {
                     let executed = if self.cpu.stopped != 0 && !self.cpu.check_interrupts() {
                         slice
                     } else {
-                        // m68k 0.2.1 の複数命令execute経路は、Human68kの割り込みを伴う
-                        // 自己再配置コードでdecode cacheが実メモリと食い違うことがある。
-                        // 命令実装そのものは同じCpuCoreへ委譲しつつ、命令境界ごとに
-                        // decodeする経路を使って正確性を優先する。
+                        // supervisor遷移をBusの保護領域判定へ即時反映するため、
+                        // 命令境界ごとに状態を同期する。
                         let mut executed = 0u32;
                         let mut ignored_trap = None;
                         while executed < slice {
@@ -456,8 +518,9 @@ impl Machine {
                 self.height = height.clamp(1, MAX_SCREEN_HEIGHT);
                 self.framebuffer[..(self.width * self.height) as usize].fill(0);
             }
-            self.bus.generate_audio(audio_frames, &mut self.audio);
-            generated_audio_frames = audio_frames;
+            self.bus
+                .generate_audio(output_audio_frames, &mut self.audio);
+            generated_audio_frames = output_audio_frames;
         }
         FrameResult {
             width: self.width,
@@ -467,18 +530,22 @@ impl Machine {
         }
     }
 
+    /// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
     pub fn drain_audio(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.audio)
     }
 
+    /// 蓄積済みの状態またはデータを取り出し、処理済みとして整理する。
     pub fn drain_midi(&mut self) -> Vec<u8> {
         self.bus.drain_midi()
     }
 
+    /// バッテリバックアップSRAMの現在内容を参照として返す。
     pub fn sram(&self) -> &[u8] {
         &self.bus.sram
     }
 
+    /// 入力データを検証して読み込み、対応する実行状態へ反映する。
     pub fn load_sram(&mut self, bytes: &[u8]) -> Result<(), MachineError> {
         if bytes.len() != self.bus.sram.len() {
             return Err(MachineError::InvalidState(format!(
@@ -490,14 +557,17 @@ impl Machine {
         Ok(())
     }
 
+    /// 現在適用中の映像オプションを返す。
     pub fn video_options(&self) -> VideoOptions {
         self.video_options
     }
 
+    /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub fn set_video_options(&mut self, options: VideoOptions) {
         self.video_options = options;
     }
 
+    /// 現在の状態を外部で扱える形式へ変換して出力する。
     pub fn save_state(&self) -> Result<Vec<u8>, MachineError> {
         let payload = StatePayload {
             cpu: CpuSnapshot::capture(&self.cpu),
@@ -511,6 +581,7 @@ impl Machine {
         state::encode(&payload, self.config.model, &self.bus.content_hashes())
     }
 
+    /// 入力データを検証して読み込み、対応する実行状態へ反映する。
     pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), MachineError> {
         let mut payload = state::decode(bytes, self.config.model, &self.bus.content_hashes())?;
         if !payload.bus.reattach_immutable(&self.bus) {
@@ -538,11 +609,13 @@ impl Machine {
 }
 
 impl Default for Machine {
+    /// ハードウェアのリセット直後に相当する既定状態を構築して返す。
     fn default() -> Self {
         Self::new(MachineConfig::default()).expect("default machine configuration is valid")
     }
 }
 
+/// 機種プロファイルからm68kコアへ渡すCPU型を選択する。
 fn cpu_type(model: MachineModel) -> CpuType {
     match model {
         MachineModel::X68000 | MachineModel::X68000Xvi => CpuType::M68000,
@@ -550,6 +623,7 @@ fn cpu_type(model: MachineModel) -> CpuType {
     }
 }
 
+/// 入力または現在状態の妥当性を検査し、問題を呼び出し側へ通知する。
 fn validate_drive(drive: DriveId) -> Result<(), MachineError> {
     match drive {
         DriveId::Floppy(0..=3) | DriveId::HardDisk(0..=7) => Ok(()),
@@ -563,12 +637,14 @@ mod tests {
     use m68k::AddressBus;
     use sha2::{Digest, Sha256};
 
+    /// 入力を処理待ちキューへ追加し、後続処理で利用できるようにする。
     fn append_move_b_imm_abs(program: &mut Vec<u8>, value: u8, address: u32) {
         program.extend_from_slice(&0x13fcu16.to_be_bytes());
         program.extend_from_slice(&u16::from(value).to_be_bytes());
         program.extend_from_slice(&address.to_be_bytes());
     }
 
+    /// CPU・映像・DMA・FDC・HDD・音声・MIDIを決定論的に検査する合成IPLを生成する。
     fn diagnostic_ipl() -> Vec<u8> {
         let mut ipl = vec![0; 0x20_000];
         // IPL末尾側のリセットベクタ: SSP=0x1000, PC=0xfe0010
@@ -605,6 +681,7 @@ mod tests {
         ipl
     }
 
+    /// 媒体を検証して対象ドライブへ装着し、アクセス可能な状態にする。
     fn mount_diagnostic_xdf(machine: &mut Machine) {
         let mut xdf = vec![0; 77 * 2 * 8 * 1024];
         xdf[0] = 0xc0;
@@ -613,6 +690,7 @@ mod tests {
             .unwrap();
     }
 
+    /// GRBiフレーム全体を決定論的な回帰試験用ハッシュへ変換する。
     fn hash_frame(frame: &[u16]) -> String {
         let mut hash = Sha256::new();
         for pixel in frame {
@@ -621,6 +699,7 @@ mod tests {
         format!("{:x}", hash.finalize())
     }
 
+    /// PCMサンプル列を決定論的な回帰試験用ハッシュへ変換する。
     fn hash_pcm(samples: &[f32]) -> String {
         // 出力APIはf32だが、goldenはホストlibmの末尾差を除外した16bit PCMとする。
         let mut hash = Sha256::new();
@@ -632,6 +711,7 @@ mod tests {
     }
 
     #[test]
+    /// `all_models_run_diagnostic_frames` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn all_models_run_diagnostic_frames() {
         for (model, expected_cpu, expected_clock) in [
             (MachineModel::X68000, CpuType::M68000, 10_000_000),
@@ -655,6 +735,7 @@ mod tests {
     }
 
     #[test]
+    /// `eight_kib_scsi_rom_is_checked_against_machine_profile` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn eight_kib_scsi_rom_is_checked_against_machine_profile() {
         let mut internal = vec![0; 0x2000];
         internal[..4].copy_from_slice(&0x00fc_0068u32.to_be_bytes());
@@ -687,6 +768,7 @@ mod tests {
     }
 
     #[test]
+    /// `x68030_stop_advances_devices_without_spinning_cpu` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn x68030_stop_advances_devices_without_spinning_cpu() {
         let mut ipl = vec![0; 0x20_000];
         ipl[0x10_000..0x10_004].copy_from_slice(&0x0000_1000u32.to_be_bytes());
@@ -705,6 +787,7 @@ mod tests {
     }
 
     #[test]
+    /// `save_state_round_trip_is_deterministic` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn save_state_round_trip_is_deterministic() {
         let mut machine = Machine::default();
         machine.run_frame();
@@ -717,6 +800,7 @@ mod tests {
     }
 
     #[test]
+    /// `media_formats_are_restricted_to_their_physical_drive_kind` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn media_formats_are_restricted_to_their_physical_drive_kind() {
         let mut machine = Machine::default();
         assert!(matches!(
@@ -735,6 +819,7 @@ mod tests {
     }
 
     #[test]
+    /// `no_rom_uses_black_frame_instead_of_phase_zero_test_pattern` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn no_rom_uses_black_frame_instead_of_phase_zero_test_pattern() {
         let mut machine = Machine::default();
         let first = machine.run_frame();
@@ -754,6 +839,22 @@ mod tests {
     }
 
     #[test]
+    /// `disabling_pcm_output_keeps_guest_audio_hardware_running` が想定する振る舞いを満たし、回帰がないことを検証する。
+    fn disabling_pcm_output_keeps_guest_audio_hardware_running() {
+        let mut machine = Machine::default();
+        machine.load_rom(RomKind::Ipl, &diagnostic_ipl()).unwrap();
+        machine.set_audio_output_enabled(false);
+
+        let frame = machine.run_frame();
+        let (writes, key_ons, _, _) = machine.audio_diagnostics();
+        assert_eq!(frame.audio_frames, 0);
+        assert!(machine.drain_audio().is_empty());
+        assert!(writes > 0);
+        assert!(key_ons > 0);
+    }
+
+    #[test]
+    /// `save_state_manifest_lists_hashes_without_embedding_immutable_assets` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn save_state_manifest_lists_hashes_without_embedding_immutable_assets() {
         let mut machine = Machine::default();
         let mut ipl = diagnostic_ipl();
@@ -788,6 +889,7 @@ mod tests {
     }
 
     #[test]
+    /// `synthetic_ipl_executes_and_writes_graphic_vram` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn synthetic_ipl_executes_and_writes_graphic_vram() {
         let mut machine = Machine::default();
         mount_diagnostic_xdf(&mut machine);
@@ -798,6 +900,7 @@ mod tests {
     }
 
     #[test]
+    /// `diagnostic_golden_and_state_reexecution_are_deterministic` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn diagnostic_golden_and_state_reexecution_are_deterministic() {
         let mut machine = Machine::default();
         mount_diagnostic_xdf(&mut machine);
@@ -826,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    /// `save_state_restores_copy_on_write_overlay` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn save_state_restores_copy_on_write_overlay() {
         let mut machine = Machine::default();
         machine
@@ -844,6 +948,7 @@ mod tests {
     }
 
     #[test]
+    /// `save_state_rejects_corruption_model_and_media_mismatch` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn save_state_rejects_corruption_model_and_media_mismatch() {
         let source = Machine::default();
         let state = source.save_state().unwrap();
@@ -894,6 +999,7 @@ mod tests {
     }
 
     #[test]
+    /// `load_state_immediately_restores_crtc_dimensions` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn load_state_immediately_restores_crtc_dimensions() {
         let mut machine = Machine::default();
         machine.bus.write_byte(0xe8_0004, 0);

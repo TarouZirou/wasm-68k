@@ -1,5 +1,7 @@
 export interface JoystickSink {
+  /** 指定したPPIポートのゲームパッドボタン状態をエミュレータへ通知する。 */
   set_joystick_button(port: number, button: number, pressed: boolean): void;
+  /** 指定したPPIポートのアナログ軸を符号付き値としてエミュレータへ通知する。 */
   set_joystick_axis(port: number, axis: number, value: number): void;
 }
 
@@ -17,6 +19,7 @@ export class GamepadController {
   private port = 0;
   private source = "";
 
+  /** 現在の状態を調べ、次の処理時点または利用可能な結果を返す。 */
   poll(pads: readonly (Gamepad | null)[], settings: GamepadSettings, sink: JoystickSink): string | undefined {
     const pad = settings.index === "auto"
       ? pads.find((candidate): candidate is Gamepad => candidate !== null)
@@ -50,6 +53,7 @@ export class GamepadController {
     return `${pad.index}: ${pad.id}`;
   }
 
+  /** 入力イベントを処理し、対応するエミュレータ状態と外部出力を更新する。 */
   release(sink?: JoystickSink): void {
     if (sink) {
       this.buttons.forEach((pressed, index) => {
@@ -65,6 +69,7 @@ export class GamepadController {
   }
 }
 
+/** 入力を解析し、後続処理で利用できる正規化済みの結果を返す。 */
 export function parseGamepadButtons(value: string): number[] {
   const parsed = value.split(",").map((item) => Number(item.trim()));
   return parsed.length === 4 && parsed.every((item) => Number.isInteger(item) && item >= 0)
@@ -72,11 +77,13 @@ export function parseGamepadButtons(value: string): number[] {
     : [0, 1, 2, 3];
 }
 
+/** 入力値を対象形式へ変換し、有効範囲に収めた結果を返す。 */
 function normalizeAxis(value: number, deadzone: number): number {
   if (Math.abs(value) <= deadzone) return 0;
   return Math.sign(value) * Math.min(1, (Math.abs(value) - deadzone) / (1 - deadzone));
 }
 
+/** 入力値を対象形式へ変換し、有効範囲に収めた結果を返す。 */
 function clamp(value: number, minimum: number, maximum: number): number {
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : minimum;
 }
