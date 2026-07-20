@@ -17,7 +17,7 @@ fn main() {
         _ => panic!("profile must be x68000, xvi or x68030"),
     };
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let local_assets = root.join("local-assets/xm6");
+    let local_assets = root.join("local-assets/roms");
     let ram_mib = std::env::var("X68K_RAM_MIB")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -29,7 +29,6 @@ fn main() {
     let floppy_path = std::env::var_os("X68K_FDD0")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("web/public/sharp/HUMAN302.XDF"));
-    let floppy = fs::read(&floppy_path).expect("FDD0 image");
     let mut machine = Machine::new(MachineConfig {
         model,
         ram_bytes: ram_mib * 1024 * 1024,
@@ -53,10 +52,15 @@ fn main() {
             .expect("local internal SCSI ROM");
         println!("loaded local internal SCSI ROM");
     }
-    machine
-        .mount_media(DriveId::Floppy(0), MediaFormat::Xdf, &floppy, true)
-        .expect("mount FDD0");
-    println!("mounted FDD0 {}", floppy_path.display());
+    if std::env::var_os("X68K_NO_FDD").is_none() {
+        let floppy = fs::read(&floppy_path).expect("FDD0 image");
+        machine
+            .mount_media(DriveId::Floppy(0), MediaFormat::Xdf, &floppy, true)
+            .expect("mount FDD0");
+        println!("mounted FDD0 {}", floppy_path.display());
+    } else {
+        println!("FDD0 is empty");
+    }
     machine.load_rom(RomKind::Ipl, &ipl).expect("load IPL");
 
     let (initial_pc, initial_sr, _, initial_sp, _) = machine.cpu_diagnostics();

@@ -502,8 +502,16 @@ impl Bus {
     fn render_line(&self, line: &mut [u16], width: u32, y: u32) {
         let (text_scroll_x, text_scroll_y) = self.devices.crtc.text_scroll();
         let scrolls = self.devices.crtc.graphic_scrolls();
+        let graphics_enabled = self.devices.video.graphics_enabled();
+        let text_enabled = self.devices.video.text_enabled();
+        let sprites_enabled = self.devices.video.sprites_enabled();
+        let special_priority_enabled = self.devices.video.special_priority_enabled();
+        let half_transparency_enabled = self.devices.video.half_transparency_enabled();
+        let graphic_priority = self.devices.video.layer_priority(0);
+        let text_priority = self.devices.video.layer_priority(1);
+        let sprite_priority = self.devices.video.layer_priority(2);
         let mut sprite_line = [0u32; MAX_SCREEN_WIDTH as usize];
-        if self.devices.video.sprites_enabled() {
+        if sprites_enabled {
             self.sprite_ram.render_scanline(
                 &self.devices.video,
                 width,
@@ -513,71 +521,79 @@ impl Bus {
         }
         for x in 0..width {
             let pixel = x as usize;
-            let graphic = self
-                .devices
-                .video
-                .graphics_enabled()
+            let graphic = graphics_enabled
                 .then(|| {
                     self.devices
                         .video
                         .graphic_pixel_with_attributes(&self.gvram, scrolls, x, y)
                 })
                 .flatten();
-            let text_x = (x + u32::from(text_scroll_x)) & 1023;
-            let text_y = (y + u32::from(text_scroll_y)) & 1023;
-            let byte_in_line = (text_y as usize * 128) + text_x as usize / 8;
-            let bit = 7 - (text_x as usize & 7);
-            let mut text_color = 0u8;
-            for plane in 0..4 {
-                let index = plane * 0x20_000 + byte_in_line;
-                if index < self.tvram.len() {
-                    text_color |= ((self.tvram[index] >> bit) & 1) << plane;
+            let text = if text_enabled {
+                let text_x = (x + u32::from(text_scroll_x)) & 1023;
+                let text_y = (y + u32::from(text_scroll_y)) & 1023;
+                let byte_in_line = (text_y as usize * 128) + text_x as usize / 8;
+                let bit = 7 - (text_x as usize & 7);
+                let mut text_color = 0u8;
+                for plane in 0..4 {
+                    let index = plane * 0x20_000 + byte_in_line;
+                    if index < self.tvram.len() {
+                        text_color |= ((self.tvram[index] >> bit) & 1) << plane;
+                    }
                 }
-            }
-            let text = (text_color != 0 && self.devices.video.text_enabled())
-                .then(|| self.devices.video.text_colour(text_color));
-            let sprite = (sprite_line[pixel] & 0x1_0000 != 0).then_some(sprite_line[pixel] as u16);
+                (text_color != 0).then(|| self.devices.video.text_colour(text_color))
+            } else {
+                None
+            };
+            let sprite = (sprites_enabled && sprite_line[pixel] & 0x1_0000 != 0)
+                .then_some(sprite_line[pixel] as u16);
             // priority値は0が最前面、2/3が最背面。同値時は
             // graphics < sprite/BG < text の順で前面になる。
-            // 固定長配列を使い、走査線のhot pathでallocationしない。
-            let mut layers = [(0u8, 0u8, 0u16, false, false); 3];
-            let mut layer_count = 0usize;
+            // 最大3層をpixelごとにsortせず、前面2層だけを直接選ぶ。
+            let mut front: Option<(u8, u8, u16, bool, bool)> = None;
+            let mut behind: Option<(u8, u8, u16, bool, bool)> = None;
+            let mut add_layer = |layer: (u8, u8, u16, bool, bool)| {
+                let in_front_of =
+                    |left: &(u8, u8, u16, bool, bool), right: &(u8, u8, u16, bool, bool)| {
+                        left.0 < right.0 || left.0 == right.0 && left.1 > right.1
+                    };
+                if front
+                    .as_ref()
+                    .is_none_or(|current| in_front_of(&layer, current))
+                {
+                    behind = front;
+                    front = Some(layer);
+                } else if behind
+                    .as_ref()
+                    .is_none_or(|current| in_front_of(&layer, current))
+                {
+                    behind = Some(layer);
+                }
+            };
             if let Some((value, special)) = graphic {
-                let priority = if special && self.devices.video.special_priority_enabled() {
+                let priority = if special && special_priority_enabled {
                     0
                 } else {
-                    self.devices.video.layer_priority(0)
+                    graphic_priority
                 };
-                let tie = if special && self.devices.video.special_priority_enabled() {
+                let tie = if special && special_priority_enabled {
                     3
                 } else {
                     0
                 };
-                layers[layer_count] = (priority, tie, value, true, special);
-                layer_count += 1;
+                add_layer((priority, tie, value, true, special));
             }
             if let Some(value) = sprite {
-                layers[layer_count] =
-                    (self.devices.video.layer_priority(2), 1, value, false, false);
-                layer_count += 1;
+                add_layer((sprite_priority, 1, value, false, false));
             }
             if let Some(value) = text {
-                layers[layer_count] =
-                    (self.devices.video.layer_priority(1), 2, value, false, false);
-                layer_count += 1;
+                add_layer((text_priority, 2, value, false, false));
             }
-            layers[..layer_count]
-                .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-            line[pixel] = if self.devices.video.half_transparency_enabled()
-                && layer_count >= 2
-                && layers[layer_count - 1].3
-                && layers[layer_count - 1].4
-            {
-                color::blend_half(layers[layer_count - 1].2, layers[layer_count - 2].2)
-            } else {
-                layer_count
-                    .checked_sub(1)
-                    .map_or(0, |index| layers[index].2)
+            line[pixel] = match (front, behind) {
+                (Some(front), Some(behind)) if half_transparency_enabled && front.3 && front.4 => {
+                    color::blend_half(front.2, behind.2)
+                }
+                (Some(front), _) => front.2,
+                (None, _) => 0,
             };
         }
     }
@@ -585,7 +601,17 @@ impl Bus {
     pub fn generate_audio(&mut self, frames: usize, output: &mut Vec<f32>) {
         self.devices
             .audio
-            .generate(frames, self.sample_rate, output);
+            .finish_frame(frames, self.sample_rate, output);
+    }
+
+    pub fn begin_audio_frame(&mut self, cycle_budget: u32, sample_frames: usize) {
+        self.devices
+            .audio
+            .begin_frame(cycle_budget, sample_frames, self.sample_rate);
+    }
+
+    pub fn set_audio_instruction_offset(&mut self, cycles: u32) {
+        self.devices.audio.set_instruction_offset(cycles);
     }
 
     pub fn drain_midi(&mut self) -> Vec<u8> {

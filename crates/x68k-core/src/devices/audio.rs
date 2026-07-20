@@ -24,11 +24,11 @@ struct Channel {
 
 #[derive(Debug, Clone, Copy)]
 struct EnvelopeParameters {
-    attack_step: f64,
-    decay_step: f64,
-    sustain_step: f64,
+    attack_coefficient: f64,
+    decay_factor: f64,
+    sustain_factor: f64,
     sustain_level: f64,
-    release_step: f64,
+    release_factor: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +91,24 @@ impl Default for Ym2151 {
 }
 
 impl Ym2151 {
+    fn silent(&self) -> bool {
+        self.channels
+            .iter()
+            .all(|channel| channel.operators.iter().all(|operator| operator.stage == 0))
+    }
+
+    fn advance_silent(&mut self, frames: usize, parameters: &RenderParameters) {
+        // LFO/noiseはkey-off中も実時間で進む。FM operator演算だけを省き、
+        // sample単位の加算順序は通常経路と揃えてsave/load後も決定論的にする。
+        for _ in 0..frames {
+            self.advance_lfo(parameters.lfo_step);
+            self.advance_noise(parameters.noise_step);
+        }
+        for channel in &mut self.channels {
+            channel.feedback = [0.0; 2];
+        }
+    }
+
     fn write(&mut self, offset: u32, value: u8) {
         match offset & 3 {
             1 => self.address = value,
@@ -226,6 +244,14 @@ impl Ym2151 {
         let mut left = 0.0;
         let mut right = 0.0;
         for channel_index in 0..8 {
+            if self.channels[channel_index]
+                .operators
+                .iter()
+                .all(|operator| operator.stage == 0)
+            {
+                self.channels[channel_index].feedback = [0.0; 2];
+                continue;
+            }
             let channel_parameters = &parameters.channels[channel_index];
             let phase_semitones =
                 lfo_pm * f64::from(self.phase_depth) / 127.0 * channel_parameters.pitch_sensitivity;
@@ -271,10 +297,11 @@ impl Ym2151 {
             } else {
                 output
             };
-            if channel_parameters.control & 0x40 != 0 {
+            // OPM RL bitsはbit7=left、bit6=right。
+            if channel_parameters.control & 0x80 != 0 {
                 left += output;
             }
-            if channel_parameters.control & 0x80 != 0 {
+            if channel_parameters.control & 0x40 != 0 {
                 right += output;
             }
         }
@@ -339,52 +366,73 @@ fn envelope_parameters(
     } else {
         (key_code >> (4 - key_scale)).min(31)
     };
-    let attack = (registers[0x80 + offset] & 0x1f)
-        .saturating_add(key_rate)
-        .min(31);
-    let decay = (registers[0xa0 + offset] & 0x1f)
-        .saturating_add(key_rate)
-        .min(31);
-    let sustain_rate = (registers[0xc0 + offset] & 0x1f)
-        .saturating_add(key_rate)
-        .min(31);
+    let effective_rate = |raw: u8| {
+        if raw == 0 {
+            0
+        } else {
+            raw.saturating_mul(2).saturating_add(key_rate).min(63)
+        }
+    };
+    let attack = effective_rate(registers[0x80 + offset] & 0x1f);
+    let decay = effective_rate(registers[0xa0 + offset] & 0x1f);
+    let sustain_rate = effective_rate(registers[0xc0 + offset] & 0x1f);
     let sustain_level = (registers[0xe0 + offset] >> 4).min(15);
-    let release = ((registers[0xe0 + offset] & 0x0f) * 2 + 1)
+    let release = ((registers[0xe0 + offset] & 0x0f) * 4 + 2)
         .saturating_add(key_rate)
-        .min(31);
-    let step = |rate: u8, divisor: f64| {
-        let rate = f64::from(rate) + 1.0;
-        rate * rate / (sample_rate * divisor)
+        .min(63);
+    // Yamaha EGのrateは4増えるごとに概ね2倍速になる。0は停止で、
+    // attack 62/63だけはkey-on時に即座に最大levelへ到達する。
+    let duration = |rate: u8| 20.0 * 2f64.powf((4.0 - f64::from(rate)) / 4.0);
+    let decay_factor = |rate: u8| {
+        if rate == 0 {
+            1.0
+        } else {
+            // durationの間に60dB（amplitude 1/1000）減衰する係数。
+            (-std::f64::consts::LN_10 * 3.0 / (duration(rate) * sample_rate)).exp()
+        }
+    };
+    let attack_coefficient = if attack == 0 {
+        0.0
+    } else if attack >= 62 {
+        1.0
+    } else {
+        1.0 - (-6.0 / (duration(attack) * sample_rate)).exp()
+    };
+    let sustain_db = if sustain_level == 15 {
+        93.0
+    } else {
+        f64::from(sustain_level) * 3.0
     };
     EnvelopeParameters {
-        attack_step: step(attack, 16.0),
-        decay_step: step(decay, 256.0),
-        sustain_step: step(sustain_rate, 1024.0),
-        sustain_level: 1.0 - f64::from(sustain_level) / 15.0,
-        release_step: step(release, 512.0),
+        attack_coefficient,
+        decay_factor: decay_factor(decay),
+        sustain_factor: decay_factor(sustain_rate),
+        sustain_level: 10f64.powf(-sustain_db / 20.0),
+        release_factor: decay_factor(release),
     }
 }
 
 fn advance_envelope(operator: &mut Operator, parameters: &EnvelopeParameters) {
     match operator.stage {
         1 => {
-            operator.envelope += parameters.attack_step;
-            if operator.envelope >= 1.0 {
+            operator.envelope += (1.0 - operator.envelope) * parameters.attack_coefficient;
+            if operator.envelope >= 1.0 - 1e-9 {
                 operator.envelope = 1.0;
                 operator.stage = 2;
             }
         }
         2 => {
-            operator.envelope -= parameters.decay_step;
+            operator.envelope *= parameters.decay_factor;
             if operator.envelope <= parameters.sustain_level {
                 operator.envelope = parameters.sustain_level;
                 operator.stage = 3;
             }
         }
-        3 => operator.envelope = (operator.envelope - parameters.sustain_step).max(0.0),
+        3 => operator.envelope *= parameters.sustain_factor,
         4 => {
-            operator.envelope = (operator.envelope - parameters.release_step).max(0.0);
-            if operator.envelope == 0.0 {
+            operator.envelope *= parameters.release_factor;
+            if operator.envelope < 1e-6 {
+                operator.envelope = 0.0;
                 operator.stage = 0;
             }
         }
@@ -491,6 +539,10 @@ impl Default for Msm6258 {
 }
 
 impl Msm6258 {
+    fn silent(&self) -> bool {
+        !self.playing && self.current == 0
+    }
+
     fn write(&mut self, offset: u32, value: u8) {
         match offset {
             1 if value & 1 != 0 => self.playing = false,
@@ -569,6 +621,22 @@ impl Msm6258 {
 pub(crate) struct AudioSystem {
     ym2151: Ym2151,
     msm6258: Msm6258,
+    /// CPU frame内のregister write時刻に合わせてPCMを分割生成するhost側状態。
+    /// save stateはframe境界でだけ作るためpayloadには含めない。
+    #[serde(skip, default)]
+    frame: AudioFrame,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AudioFrame {
+    active: bool,
+    cycle_budget: u32,
+    sample_frames: usize,
+    sample_rate: u32,
+    elapsed_cycles: u32,
+    instruction_offset: u32,
+    generated_frames: usize,
+    output: Vec<f32>,
 }
 
 impl AudioSystem {
@@ -577,6 +645,11 @@ impl AudioSystem {
     }
 
     pub(crate) fn write_ym(&mut self, offset: u32, value: u8) {
+        // data registerの効果をframe末尾のPCM全体へ遡及させない。address latch
+        // 自体は無音なので、実際のregister write直前までを旧状態で生成する。
+        if offset & 3 == 3 {
+            self.render_to_cursor();
+        }
         self.ym2151.write(offset, value);
         if offset & 3 == 3 && self.ym2151.address == 0x1b {
             self.msm6258.clock_select = (value >> 5) & 4 | (self.msm6258.pan >> 2) & 3;
@@ -588,29 +661,99 @@ impl AudioSystem {
     }
 
     pub(crate) fn write_adpcm(&mut self, offset: u32, value: u8) {
+        self.render_to_cursor();
         self.msm6258.write(offset, value);
     }
 
     pub(crate) fn set_pan(&mut self, value: u8) {
+        self.render_to_cursor();
         self.msm6258.pan = value & 0x0f;
         self.msm6258.clock_select = (self.msm6258.clock_select & 4) | ((value >> 2) & 3);
     }
 
     pub(crate) fn tick(&mut self, cycles: u32, cpu_clock: u32) -> bool {
-        self.ym2151.tick(cycles, cpu_clock)
+        let irq = self.ym2151.tick(cycles, cpu_clock);
+        if self.frame.active {
+            self.frame.elapsed_cycles = self.frame.elapsed_cycles.saturating_add(cycles);
+            self.frame.instruction_offset = 0;
+        }
+        irq
+    }
+
+    pub(crate) fn begin_frame(
+        &mut self,
+        cycle_budget: u32,
+        sample_frames: usize,
+        sample_rate: u32,
+    ) {
+        self.frame.active = true;
+        self.frame.cycle_budget = cycle_budget.max(1);
+        self.frame.sample_frames = sample_frames;
+        self.frame.sample_rate = sample_rate;
+        self.frame.elapsed_cycles = 0;
+        self.frame.instruction_offset = 0;
+        self.frame.generated_frames = 0;
+        self.frame.output.clear();
+    }
+
+    pub(crate) fn set_instruction_offset(&mut self, cycles: u32) {
+        if self.frame.active {
+            self.frame.instruction_offset = cycles;
+        }
     }
 
     pub(crate) fn generate(&mut self, frames: usize, sample_rate: u32, output: &mut Vec<f32>) {
         output.reserve(frames * 2);
-        // CPUが1frameを走り終えた時点のOPMレジスタは、このPCMブロック中は
-        // 不変。レジスタ由来のpow/除算をサンプルごとに繰り返さない。
+        // register write間ではOPM parameterは不変。pow/除算をsampleごとに
+        // 繰り返さず、frame内writeの直前でblockを分割する。
         let parameters = self.ym2151.render_parameters(sample_rate);
+        if self.ym2151.silent() && self.msm6258.silent() {
+            self.ym2151.advance_silent(frames, &parameters);
+            output.resize(output.len() + frames * 2, 0.0);
+            return;
+        }
         for _ in 0..frames {
             let fm = self.ym2151.sample(&parameters);
             let adpcm = self.msm6258.sample(sample_rate);
             output.push((fm.0 + adpcm.0 * 0.5).clamp(-1.0, 1.0));
             output.push((fm.1 + adpcm.1 * 0.5).clamp(-1.0, 1.0));
         }
+    }
+
+    pub(crate) fn finish_frame(&mut self, frames: usize, sample_rate: u32, output: &mut Vec<f32>) {
+        if !self.frame.active {
+            self.generate(frames, sample_rate, output);
+            return;
+        }
+        self.render_to_frame(frames);
+        output.append(&mut self.frame.output);
+        self.frame = AudioFrame::default();
+    }
+
+    fn render_to_cursor(&mut self) {
+        if !self.frame.active {
+            return;
+        }
+        let cycles = self
+            .frame
+            .elapsed_cycles
+            .saturating_add(self.frame.instruction_offset)
+            .min(self.frame.cycle_budget);
+        let target = (u64::from(cycles) * self.frame.sample_frames as u64
+            / u64::from(self.frame.cycle_budget)) as usize;
+        self.render_to_frame(target);
+    }
+
+    fn render_to_frame(&mut self, target: usize) {
+        let target = target.min(self.frame.sample_frames);
+        let count = target.saturating_sub(self.frame.generated_frames);
+        if count == 0 {
+            return;
+        }
+        let mut output = std::mem::take(&mut self.frame.output);
+        self.generate(count, self.frame.sample_rate, &mut output);
+        self.frame.output = output;
+        self.frame.generated_frames = target;
     }
 }
 
@@ -635,6 +778,14 @@ mod tests {
         write_ym(audio, 0x08, 0x78 | channel);
     }
 
+    fn configure_single_carrier(audio: &mut AudioSystem, control: u8) {
+        write_ym(audio, 0x20, control | 7);
+        write_ym(audio, 0x28, 0x4c);
+        write_ym(audio, 0x40, 1);
+        write_ym(audio, 0x60, 0);
+        write_ym(audio, 0x80, 0x1f);
+    }
+
     #[test]
     fn ym2151_key_on_generates_stereo_pcm() {
         let mut audio = AudioSystem::default();
@@ -643,6 +794,48 @@ mod tests {
         audio.generate(512, 48_000, &mut samples);
         assert!(samples.iter().any(|sample| sample.abs() > 0.0001));
         assert_eq!(samples.len(), 1024);
+    }
+
+    #[test]
+    fn ym2151_rl_bits_route_left_and_right_in_chip_order() {
+        let mut audio = AudioSystem::default();
+        configure_single_carrier(&mut audio, 0x80);
+        write_ym(&mut audio, 0x08, 0x08);
+        let mut samples = Vec::new();
+        audio.generate(512, 48_000, &mut samples);
+        assert!(samples.chunks_exact(2).any(|frame| frame[0].abs() > 0.0001));
+        assert!(samples.chunks_exact(2).all(|frame| frame[1] == 0.0));
+    }
+
+    #[test]
+    fn ym2151_zero_attack_rate_does_not_open_envelope() {
+        let mut audio = AudioSystem::default();
+        write_ym(&mut audio, 0x20, 0xc7);
+        write_ym(&mut audio, 0x28, 0x4c);
+        write_ym(&mut audio, 0x40, 1);
+        write_ym(&mut audio, 0x60, 0);
+        // AR=0は停止rateであり、key-onだけではenvelopeが立ち上がらない。
+        write_ym(&mut audio, 0x08, 0x08);
+        let mut samples = Vec::new();
+        audio.generate(512, 48_000, &mut samples);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn frame_timeline_keeps_short_key_event_at_its_cycle_position() {
+        let mut audio = AudioSystem::default();
+        configure_single_carrier(&mut audio, 0xc0);
+        audio.begin_frame(1_000, 100, 48_000);
+        audio.set_instruction_offset(250);
+        write_ym(&mut audio, 0x08, 0x08);
+        audio.set_instruction_offset(750);
+        write_ym(&mut audio, 0x08, 0x00);
+
+        let mut samples = Vec::new();
+        audio.finish_frame(100, 48_000, &mut samples);
+        assert_eq!(samples.len(), 200);
+        assert!(samples[..50].iter().all(|sample| *sample == 0.0));
+        assert!(samples[50..150].iter().any(|sample| sample.abs() > 0.0001));
     }
 
     #[test]

@@ -44,6 +44,8 @@ cargo deny check
 cd web
 npm ci
 npm run dev
+# 生成済みWasmを使ってViteだけを起動
+npm run dev:vite
 npm run build:pages
 ```
 
@@ -72,8 +74,8 @@ automatically. IndexedDB also contains settings, SRAM and save states.
 The core displays black until an IPL is loaded; the former Phase 0 test pattern
 is no longer part of the emulator path.
 
-XM6などから利用者が用意した`CGROM.DAT`、SCSI ROM、付属DLLは
-`local-assets/xm6/`に置く。このディレクトリはGitとPagesから除外され、Webでは
+利用者が別途用意した`CGROM.DAT`、SCSI ROM、関連DLLは
+`local-assets/roms/`に置く。このディレクトリはGitとPagesから除外され、Webでは
 CG ROM欄の「読込」から`CGROM.DAT`を選ぶ。DLL自体をブラウザへ読み込ませる必要は
 ない。コアの手動起動トレースは同ディレクトリのCGROMと、X68030の場合だけ
 `SCSIINROM.DAT`を自動検出する。

@@ -18,6 +18,7 @@ pub struct WebX68k {
     last_audio_peak: f32,
     last_frame_timestamp: Option<f64>,
     frame_accumulator_ms: f64,
+    needs_redraw: bool,
 }
 
 #[wasm_bindgen]
@@ -31,9 +32,10 @@ impl WebX68k {
             .map_err(js_error)?;
         let machine = Machine::new(MachineConfig {
             model,
-            // 市販ソフトの固定buffer・常駐driverと、RAM終端を直接走査する
-            // ソフトの双方に対応するため、Web版は全機種を実機上限の12MiBにする。
-            ram_bytes: 12 * 1024 * 1024,
+            // 初代IPLには12MiB構成で媒体なし起動が
+            // 致命errorへ入る既知問題がある。また既知gameは9MiBを超えて使わない。
+            // 互換性とhost memory消費の両方を優先してWeb版は9MiBとする。
+            ram_bytes: 9 * 1024 * 1024,
             ..MachineConfig::default()
         })
         .map_err(js_error)?;
@@ -46,15 +48,18 @@ impl WebX68k {
             last_audio_peak: 0.0,
             last_frame_timestamp: None,
             frame_accumulator_ms: 0.0,
+            needs_redraw: true,
         })
     }
 
     pub fn frame(&mut self, timestamp: f64) {
         const FRAME_MS: f64 = 1000.0 / 60.0;
+        let mut advanced = false;
         match self.last_frame_timestamp.replace(timestamp) {
             None => {
                 // 初回は即座に1フレーム生成し、黒画面のまま待たせない。
                 self.machine.run_frame();
+                advanced = true;
             }
             Some(previous) => {
                 // 高リフレッシュレート画面でも実機時間は60Hzで進める。1回の
@@ -68,10 +73,16 @@ impl WebX68k {
                 self.frame_accumulator_ms += elapsed;
                 if self.frame_accumulator_ms + f64::EPSILON >= FRAME_MS {
                     self.machine.run_frame();
+                    advanced = true;
                     self.frame_accumulator_ms =
                         (self.frame_accumulator_ms - FRAME_MS).min(FRAME_MS);
                 }
             }
+        }
+        // 120/144Hz displayでは同じ60Hz frameを2回以上送らない。texture全体の
+        // upload、command encoder生成、presentを省けるためGPU/CPU負荷を抑えられる。
+        if !advanced && !self.needs_redraw {
+            return;
         }
         let (width, height) = self.machine.screen_dimensions();
         if let Err(error) = self
@@ -80,10 +91,12 @@ impl WebX68k {
         {
             web_sys::console::error_1(&JsValue::from_str(&format!("render error: {error:#}")));
         }
+        self.needs_redraw = false;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.renderer.resize(width, height);
+        self.needs_redraw = true;
     }
 
     pub fn backend_name(&self) -> String {
@@ -100,6 +113,14 @@ impl WebX68k {
 
     pub fn frame_number(&self) -> u64 {
         self.machine.frame_count()
+    }
+
+    pub fn screen_width(&self) -> u32 {
+        self.machine.screen_dimensions().0
+    }
+
+    pub fn screen_height(&self) -> u32 {
+        self.machine.screen_dimensions().1
     }
 
     pub fn load_rom(&mut self, kind: String, bytes: &[u8]) -> Result<(), JsValue> {
@@ -150,6 +171,7 @@ impl WebX68k {
         self.machine.reset();
         self.last_frame_timestamp = None;
         self.frame_accumulator_ms = 0.0;
+        self.needs_redraw = true;
     }
 
     pub fn set_paused(&mut self, paused: bool) {
@@ -240,6 +262,7 @@ impl WebX68k {
         self.machine.set_video_options(options);
         self.renderer
             .set_crt_options(crt_enabled, scanline_strength, mask_strength, curvature);
+        self.needs_redraw = true;
     }
 
     pub fn save_state(&self) -> Result<Vec<u8>, JsValue> {
@@ -247,7 +270,9 @@ impl WebX68k {
     }
 
     pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
-        self.machine.load_state(bytes).map_err(js_error)
+        self.machine.load_state(bytes).map_err(js_error)?;
+        self.needs_redraw = true;
+        Ok(())
     }
 
     pub fn export_sram(&self) -> Vec<u8> {

@@ -202,7 +202,7 @@ impl Machine {
                 });
             }
             RomKind::Scsi if bytes.len() == 0x2000 => {
-                // XM6系の8KiB SCSI ROMは先頭ベクタで接続先を識別できる。
+                // 8KiB SCSI ROMは先頭ベクタで接続先を識別できる。
                 // $FCxxxx はX68030内蔵SCSI (SCSIINROM)、$EAxxxx は
                 // X68000/XVI拡張SCSI (SCSIEXROM) なので、機種違いのROMを
                 // 誤ってマップするとIPLが別の例外／エラー処理へ進んでしまう。
@@ -373,10 +373,14 @@ impl Machine {
         // use FrameResult for pacing without double-counting queued PCM.
         let mut generated_audio_frames = 0usize;
         if !self.paused {
+            let numerator = self.audio_remainder + self.config.sample_rate;
+            let audio_frames = (numerator / 60) as usize;
+            self.audio_remainder = numerator % 60;
             if !self.bus.ipl.is_empty() {
                 let cycle_numerator = self.cycle_remainder + self.config.model.clock_hz();
                 let frame_budget = cycle_numerator / 60;
                 self.cycle_remainder = cycle_numerator % 60;
+                self.bus.begin_audio_frame(frame_budget, audio_frames);
                 let mut remaining = frame_budget.saturating_sub(self.cpu_cycle_debt);
                 self.cpu_cycle_debt = self.cpu_cycle_debt.saturating_sub(frame_budget);
                 while remaining > 0 {
@@ -398,6 +402,7 @@ impl Machine {
                         let mut executed = 0u32;
                         let mut ignored_trap = None;
                         while executed < slice {
+                            self.bus.set_audio_instruction_offset(executed);
                             let irq = self.bus.pending_irq();
                             self.cpu.set_irq(irq);
                             self.bus.set_supervisor(self.cpu.is_supervisor());
@@ -446,9 +451,6 @@ impl Machine {
                 self.height = height.clamp(1, MAX_SCREEN_HEIGHT);
                 self.framebuffer[..(self.width * self.height) as usize].fill(0);
             }
-            let numerator = self.audio_remainder + self.config.sample_rate;
-            let audio_frames = (numerator / 60) as usize;
-            self.audio_remainder = numerator % 60;
             self.bus.generate_audio(audio_frames, &mut self.audio);
             generated_audio_frames = audio_frames;
         }
@@ -814,7 +816,7 @@ mod tests {
         );
         assert_eq!(
             first_pcm_hash,
-            "8544044bfa21add8f5b70a70843fc42625ce3ee16860b475df461d4cd52c9e90"
+            "29dab4aba7bbd914a5387712d98b63f098c9ddb49f10f67fa9d97486a1aaa8c3"
         );
     }
 

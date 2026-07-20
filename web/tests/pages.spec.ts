@@ -94,7 +94,7 @@ test("WebGL2 fallback initializes when WebGPU is unavailable", async ({ page }) 
   await expect(page.locator("#backend")).toContainText("webgl2");
 });
 
-test("settings persist in IndexedDB and the renderer resizes", async ({ page }) => {
+test("settings persist and display scaling stays pixel-exact", async ({ page }) => {
   await page.goto("/wasm-68k/");
   await expect(page.locator("#status")).toContainText("準備完了");
   await page.locator("#volume").fill("0.31");
@@ -130,10 +130,18 @@ test("settings persist in IndexedDB and the renderer resizes", async ({ page }) 
   await expect(page.locator("#gamepad-deadzone")).toHaveValue("0.35");
   await expect(page.locator("#gamepad-buttons")).toHaveValue("2,3,0,1");
 
-  const before = await page.locator("#screen").evaluate((canvas: HTMLCanvasElement) => canvas.width);
-  await page.setViewportSize({ width: 720, height: 700 });
-  await expect.poll(() => page.locator("#screen").evaluate((canvas: HTMLCanvasElement) => canvas.width))
-    .not.toBe(before);
+  await page.locator("#display-size").selectOption("native");
+  await expect.poll(() => page.locator("#screen").evaluate((canvas: HTMLCanvasElement) => {
+    const rect = canvas.getBoundingClientRect();
+    return [rect.width, rect.height, getComputedStyle(canvas).imageRendering];
+  })).toEqual([768, 512, "pixelated"]);
+
+  await page.locator("#display-size").selectOption("auto");
+  await page.setViewportSize({ width: 2200, height: 1200 });
+  await expect.poll(() => page.locator("#screen").evaluate((canvas: HTMLCanvasElement) => {
+    const rect = canvas.getBoundingClientRect();
+    return [rect.width, rect.height];
+  })).toEqual([1536, 1024]);
 
   await page.locator("#display-size").selectOption("768x512");
   await expect.poll(() => page.locator("#screen").evaluate((canvas: HTMLCanvasElement) => [canvas.width, canvas.height]))

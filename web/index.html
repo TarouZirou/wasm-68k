@@ -63,7 +63,7 @@
 				font-size: 12px;
 			}
 			main {
-				width: min(1440px, 100%);
+				width: min(2200px, 100%);
 				margin: auto;
 				display: grid;
 				grid-template-columns: minmax(0, 1fr) 330px;
@@ -73,14 +73,23 @@
 			.screen-wrap {
 				min-width: 0;
 			}
-			#screen {
-				display: block;
-				width: 100%;
-				aspect-ratio: 3/2;
+			.screen-viewport {
+				max-width: 100%;
+				overflow: auto;
 				background: #000;
 				border: 1px solid #303d4d;
 				border-radius: 8px;
+			}
+			#screen {
+				display: block;
+				width: 768px;
+				height: 512px;
+				background: #000;
+				border: 0;
+				border-radius: 0;
 				outline: none;
+				image-rendering: crisp-edges;
+				image-rendering: pixelated;
 			}
 			#screen.drop {
 				border-color: #63b3ed;
@@ -189,13 +198,15 @@
 		</header>
 		<main>
 			<section class="screen-wrap">
-				<canvas
-					id="screen"
-					width="768"
-					height="512"
-					tabindex="0"
-					aria-label="X68000 screen"
-				></canvas>
+				<div class="screen-viewport" id="screen-viewport">
+					<canvas
+						id="screen"
+						width="768"
+						height="512"
+						tabindex="0"
+						aria-label="X68000 screen"
+					></canvas>
+				</div>
 				<p id="status" role="status">Wasmを読み込んでいます…</p>
 				<p class="hint">
 					ROMやディスクは外部へ送信されません。読み込んだROMだけをこのブラウザ内へ保存し、次回起動時に復元します。
@@ -251,12 +262,20 @@
 					</div>
 					<div class="official-software">
 						<p>
-							Sharp公式配布の機種別IPLとHuman68k 3.02を、FDD0を書込保護して起動します。
+							Sharp公式配布の機種別IPLとHuman68k
+							3.02を、FDD0を書込保護して起動します。
 						</p>
-						<button id="official-software">公式Human68kを起動</button>
+						<button id="official-software">
+							公式Human68kを起動
+						</button>
 						<p class="danger">
 							Xシリーズ／エミュレータ専用・非商用のみ。
-							<a href="./sharp/SHARP_LICENSE_UTF8.txt" target="_blank" rel="license noopener">Sharp許諾条件</a>
+							<a
+								href="./sharp/SHARP_LICENSE_UTF8.txt"
+								target="_blank"
+								rel="license noopener"
+								>Sharp許諾条件</a
+							>
 						</p>
 					</div>
 				</fieldset>
@@ -321,7 +340,10 @@
 					<div class="row">
 						<label for="display-size">描画解像度</label
 						><select id="display-size">
-							<option value="auto">画面に合わせる</option>
+							<option value="native">等倍（1px = 1px）</option>
+							<option value="auto">
+								画面に合わせる（整数倍）
+							</option>
 							<option value="768x512">768 × 512</option>
 						</select>
 					</div>
@@ -394,21 +416,30 @@
 					</div>
 					<div class="row">
 						<label for="gamepad-deadzone">スティック遊び</label
-						><input id="gamepad-deadzone" type="range" min="0" max="0.9" step="0.05" value="0.25" />
+						><input
+							id="gamepad-deadzone"
+							type="range"
+							min="0"
+							max="0.9"
+							step="0.05"
+							value="0.25"
+						/>
 					</div>
 					<div class="row">
 						<label for="gamepad-buttons">A/B/C/Dボタン番号</label
 						><input id="gamepad-buttons" value="0,1,2,3" size="9" />
 					</div>
-					<p class="media-name">接続: <span id="gamepad-status">未接続</span></p>
+					<p class="media-name">
+						接続: <span id="gamepad-status">未接続</span>
+					</p>
 					<details>
 						<summary>キーマップ JSON</summary>
 						<textarea
 							id="keymap"
 							rows="7"
 							style="width: 100%"
-						></textarea
-						><div class="toolbar">
+						></textarea>
+						<div class="toolbar">
 							<button id="apply-keymap">適用・保存</button>
 							<button id="reset-keymap">X68000既定値</button>
 						</div>
@@ -442,10 +473,15 @@
 			</aside>
 		</main>
 		<footer>
-			<a href="./LICENSE">GPL-2.0-only</a> · <a href="./LICENSE-EXCEPTION">リンク例外</a> ·
-			<a href="./THIRD_PARTY_NOTICES.md">第三者通知</a> · Rust / WebAssembly / WebGPU ·
-			Sharp公式IPL・Human68k 3.02は<a href="./sharp/SHARP_LICENSE_UTF8.txt" rel="license">別許諾・非商用</a> ·
-			CGROM・ゲームは同梱していません
+			<a href="./LICENSE">GPL-2.0-only</a> ·
+			<a href="./LICENSE-EXCEPTION">リンク例外</a> ·
+			<a href="./THIRD_PARTY_NOTICES.md">第三者通知</a> · Rust /
+			WebAssembly / WebGPU · Sharp公式IPL・Human68k 3.02は<a
+				href="./sharp/SHARP_LICENSE_UTF8.txt"
+				rel="license"
+				>別許諾・非商用</a
+			>
+			· CGROM・ゲームは同梱していません
 		</footer>
 		<input id="file-picker" type="file" hidden />
 		<!-- 相対URLにして、Pagesの /wasm-68k/ サブパスでも開発サーバーでも同じ入口にする。 -->

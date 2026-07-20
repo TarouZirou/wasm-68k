@@ -31,9 +31,9 @@ mountする。利用者の変更は元ファイルへ反映せず、コアのcop
 mapするため、IPL/FDCは例外停止せず進むが文字は表示されない。正しい文字表示には
 利用者が権利を持つ768KiBの`CGROM.DAT`をWeb UIから読み込む必要がある。
 
-XM6等に付属するCGROM、SCSI ROM、DLLはSharp公式配布資産の許諾対象として扱わない。
+利用者が別途用意したCGROM、SCSI ROM、DLLはSharp公式配布資産の許諾対象として扱わない。
 ローカル検証用に置く場合は、公開ディレクトリ`web/public/`ではなくGit除外済みの
-`local-assets/xm6/`を使用する。Viteは`web/public/`をそのままPages成果物へコピー
+`local-assets/roms/`を使用する。Viteは`web/public/`をそのままPages成果物へコピー
 するため、そこへ置いてはならない。
 
 SCSI ROMの種類にも注意する。`SCSIINROM.DAT`はX68030内蔵SCSI用、

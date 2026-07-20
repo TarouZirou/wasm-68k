@@ -16,6 +16,8 @@ type LoadTarget = RomTarget | `fdd${0 | 1 | 2 | 3}` | "hdd0" | "state";
 // 保持する。実体の存在はPages E2Eで検証する。
 type Emulator = WebX68k & {
   frame_number(): bigint;
+  screen_width(): number;
+  screen_height(): number;
   set_volume(volume: number): void;
 };
 
@@ -44,6 +46,7 @@ let gainNode: GainNode | undefined;
 let midiOutput: MIDIOutput | undefined;
 let activeModel = "x68000";
 let uiFrames = 0;
+let lastScreenSize = "";
 let assetLoadInProgress = false;
 const mountedNames = new Map<LoadTarget, string>();
 const browserStore = new BrowserBinaryStore("wasm-68k", "data");
@@ -227,11 +230,27 @@ async function createEmulator(): Promise<void> {
 
 function fitCanvas(): void {
   if (!emulator || !emulatorReady) return;
-  const fixed = $<HTMLSelectElement>("display-size").value === "768x512";
+  const mode = $<HTMLSelectElement>("display-size").value;
+  const nativeWidth = Math.max(1, emulator.screen_width());
+  const nativeHeight = Math.max(1, emulator.screen_height());
+  const viewport = $<HTMLDivElement>("screen-viewport");
+  let cssWidth = nativeWidth;
+  let cssHeight = nativeHeight;
+  if (mode === "768x512") {
+    cssWidth = 768;
+    cssHeight = 512;
+  } else if (mode === "auto") {
+    // Fractional stretchは1画素の幅を不均一にする。入る範囲の整数倍だけを使い、
+    // 1倍未満になる狭い画面では縮小せずscrollできるようにする。
+    const scale = Math.max(1, Math.floor(viewport.clientWidth / nativeWidth));
+    cssWidth = nativeWidth * scale;
+    cssHeight = nativeHeight * scale;
+  }
+  canvas.style.width = `${cssWidth}px`;
+  canvas.style.height = `${cssHeight}px`;
   const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  const width = fixed ? 768 : Math.max(1, Math.round(rect.width * dpr));
-  const height = fixed ? 512 : Math.max(1, Math.round(rect.height * dpr));
+  const width = Math.max(1, Math.round(cssWidth * dpr));
+  const height = Math.max(1, Math.round(cssHeight * dpr));
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
@@ -451,7 +470,7 @@ async function restoreSettings(): Promise<void> {
       restoreRange("scanline", settings.scanline);
       restoreRange("mask", settings.mask);
       restoreRange("curvature", settings.curvature);
-      if (["auto", "768x512"].includes(String(settings.displaySize))) {
+      if (["native", "auto", "768x512"].includes(String(settings.displaySize))) {
         $<HTMLSelectElement>("display-size").value = String(settings.displaySize);
       }
       if (["auto", "0", "1", "2", "3"].includes(String(settings.gamepadIndex))) {
@@ -520,7 +539,7 @@ function releaseTransientInputs(): void {
 }
 
 function wireUi(): void {
-  new ResizeObserver(fitCanvas).observe(canvas);
+  new ResizeObserver(fitCanvas).observe($<HTMLDivElement>("screen-viewport"));
   model.addEventListener("change", () => {
     void saveSettings().catch(console.warn);
     void createEmulator().catch(showError);
@@ -671,6 +690,11 @@ function animate(timestamp: number): void {
   }
   emulator.frame(timestamp);
   canvas.dataset.machineFrame = String(emulator.frame_number());
+  const screenSize = `${emulator.screen_width()}x${emulator.screen_height()}`;
+  if (screenSize !== lastScreenSize) {
+    lastScreenSize = screenSize;
+    fitCanvas();
+  }
   if (autoPauseAfterFirstFrame && emulator.frame_number() >= 1 && !emulator.is_paused()) {
     emulator.set_paused(true);
     resetAudioBuffer();
