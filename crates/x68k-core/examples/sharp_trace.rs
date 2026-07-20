@@ -22,6 +22,10 @@ fn main() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or_else(|| if model == MachineModel::X68030 { 12 } else { 2 });
+    let sample_rate = std::env::var("X68K_SAMPLE_RATE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(48_000);
     let ipl_path = std::env::var_os("X68K_IPL")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("web/public/sharp").join(ipl_name));
@@ -32,11 +36,15 @@ fn main() {
     let mut machine = Machine::new(MachineConfig {
         model,
         ram_bytes: ram_mib * 1024 * 1024,
+        sample_rate,
         ..MachineConfig::default()
     })
     .expect("machine");
     machine.set_cpu_trap_diagnostics(std::env::var_os("X68K_TRACE_TRAPS").is_some());
-    if let Ok(cgrom) = fs::read(local_assets.join("CGROM.DAT")) {
+    let cgrom_path = std::env::var_os("X68K_CGROM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| local_assets.join("CGROM.DAT"));
+    if let Ok(cgrom) = fs::read(cgrom_path) {
         machine
             .load_rom(RomKind::CharacterGenerator, &cgrom)
             .expect("local CGROM");
@@ -110,6 +118,24 @@ fn main() {
         .ok()
         .and_then(|value| u8::from_str_radix(value.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0x35);
+    let joystick_at = std::env::var("X68K_JOYSTICK_AT")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok());
+    let joystick_port = std::env::var("X68K_JOYSTICK_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(0)
+        .min(1);
+    let joystick_button = std::env::var("X68K_JOYSTICK_BUTTON")
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(0)
+        .min(3);
+    let joystick_hold_frames = std::env::var("X68K_JOYSTICK_HOLD_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1);
     let mut key_events = std::env::var("X68K_KEYS")
         .ok()
         .into_iter()
@@ -149,7 +175,21 @@ fn main() {
         .collect::<Vec<_>>();
     let mut audio_peak = 0.0f32;
     let mut audio_samples = 0usize;
+    let mut captured_audio = std::env::var_os("X68K_AUDIO_WAV").map(|_| Vec::<i16>::new());
     for frame in 1..=frames {
+        if joystick_at == Some(frame) {
+            machine.input(InputEvent::JoystickButton {
+                port: joystick_port,
+                button: joystick_button,
+                pressed: true,
+            });
+        } else if joystick_at.is_some_and(|at| frame == at.saturating_add(joystick_hold_frames)) {
+            machine.input(InputEvent::JoystickButton {
+                port: joystick_port,
+                button: joystick_button,
+                pressed: false,
+            });
+        }
         for &(_, scancode) in key_events.iter().filter(|(at, _)| *at == frame) {
             machine.input(InputEvent::Key {
                 scancode,
@@ -183,8 +223,15 @@ fn main() {
         let samples = machine.drain_audio();
         audio_samples += samples.len();
         audio_peak = samples
-            .into_iter()
+            .iter()
             .fold(audio_peak, |peak, sample| peak.max(sample.abs()));
+        if let Some(output) = &mut captured_audio {
+            output.extend(
+                samples
+                    .iter()
+                    .map(|sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16),
+            );
+        }
         if trace_every_frame && frame >= trace_from
             || (result.width, result.height) != previous
             || matches!(frame, 1 | 2 | 5 | 10 | 30 | 60 | 120 | 180)
@@ -244,6 +291,13 @@ fn main() {
         }
     }
     println!("audio_samples={audio_samples} audio_peak={audio_peak:.6}");
+    let (ym_writes, ym_key_ons, ym_active, ym_peak) = machine.audio_diagnostics();
+    println!(
+        "ym_writes={ym_writes} ym_key_ons={ym_key_ons} ym_active={ym_active:02x} ym_peak={ym_peak}"
+    );
+    if let (Some(path), Some(samples)) = (std::env::var_os("X68K_AUDIO_WAV"), captured_audio) {
+        write_pcm_wav(PathBuf::from(path), sample_rate, &samples);
+    }
     if let Some(path) = std::env::var_os("X68K_TRACE_PPM") {
         let (width, height) = machine.screen_dimensions();
         let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
@@ -266,4 +320,26 @@ fn main() {
     if let Some((pc, opcode, kind)) = machine.cpu_trap_diagnostics() {
         println!("last_cpu_trap kind={kind} pc={pc:08x} opcode={opcode:04x}");
     }
+}
+
+fn write_pcm_wav(path: PathBuf, sample_rate: u32, samples: &[i16]) {
+    let data_size = u32::try_from(samples.len() * 2).expect("WAV data fits u32");
+    let mut wav = Vec::with_capacity(44 + data_size as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    fs::write(&path, wav).expect("write trace WAV");
+    println!("wrote_audio={}", path.display());
 }

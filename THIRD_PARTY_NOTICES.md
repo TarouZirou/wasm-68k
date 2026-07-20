@@ -12,6 +12,8 @@ Notable runtime components:
   the X68000 Area Set controller, plus consistent interrupt wake-up for the
   crate's single-step APIs. Its original `LICENSE` is included unchanged.
 - SingleStepTests/m68000 representative test data — MIT
+- ymfm YM2151 reference tables — BSD-3-Clause, copyright Aaron Giles; the
+  complete notice is included at `licenses/ymfm-BSD-3-Clause.txt`
 - wgpu, winit, wasm-bindgen and web-sys — MIT OR Apache-2.0 (used under MIT)
 - Rust-SDL2 — MIT; system SDL2 — Zlib (native audio output)
 - midir — MIT (native MIDI output)

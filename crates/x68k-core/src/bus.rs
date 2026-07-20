@@ -638,6 +638,10 @@ impl Bus {
         self.devices.fdc.diagnostics()
     }
 
+    pub fn audio_diagnostics(&self) -> (u64, u64, u8, u16) {
+        self.devices.audio.diagnostics()
+    }
+
     pub fn fdc_result_status(&self) -> [u8; 3] {
         self.devices.fdc.result_status()
     }

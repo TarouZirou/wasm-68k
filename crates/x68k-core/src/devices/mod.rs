@@ -6,6 +6,8 @@ pub(crate) mod gvram;
 pub(crate) mod hdc;
 pub(crate) mod mfp;
 pub(crate) mod midi;
+mod opm;
+mod opm_tables;
 pub(crate) mod ppi;
 pub(crate) mod rtc;
 pub(crate) mod scc;

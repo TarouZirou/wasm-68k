@@ -4,512 +4,10 @@
 //! `x68k/adpcm.c` を比較資料としている。FM演算部はRustで独立実装している。
 
 use std::collections::VecDeque;
-use std::f64::consts::TAU;
-use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-struct Operator {
-    phase: f64,
-    envelope: f64,
-    stage: u8,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-struct Channel {
-    operators: [Operator; 4],
-    feedback: [f64; 2],
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EnvelopeParameters {
-    attack_coefficient: f64,
-    decay_factor: f64,
-    sustain_factor: f64,
-    sustain_level: f64,
-    release_factor: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct OperatorParameters {
-    phase_step: f64,
-    attenuation: f64,
-    amplitude_modulation: bool,
-    envelope: EnvelopeParameters,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ChannelParameters {
-    control: u8,
-    algorithm: u8,
-    pitch_sensitivity: f64,
-    amplitude_sensitivity: f64,
-    operators: [OperatorParameters; 4],
-}
-
-#[derive(Debug, Clone)]
-struct RenderParameters {
-    channels: [ChannelParameters; 8],
-    lfo_step: f64,
-    noise_step: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Ym2151 {
-    registers: Vec<u8>,
-    address: u8,
-    channels: [Channel; 8],
-    timer_a_counter: u64,
-    timer_b_counter: u64,
-    timer_fraction: u64,
-    status: u8,
-    lfo_phase: f64,
-    noise_phase: f64,
-    noise_lfsr: u32,
-    amplitude_depth: u8,
-    phase_depth: u8,
-}
-
-impl Default for Ym2151 {
-    fn default() -> Self {
-        Self {
-            registers: vec![0; 256],
-            address: 0,
-            channels: [Channel::default(); 8],
-            timer_a_counter: 0,
-            timer_b_counter: 0,
-            timer_fraction: 0,
-            status: 0,
-            lfo_phase: 0.0,
-            noise_phase: 0.0,
-            noise_lfsr: 0x1ffff,
-            amplitude_depth: 0,
-            phase_depth: 0,
-        }
-    }
-}
-
-impl Ym2151 {
-    fn silent(&self) -> bool {
-        self.channels
-            .iter()
-            .all(|channel| channel.operators.iter().all(|operator| operator.stage == 0))
-    }
-
-    fn advance_silent(&mut self, frames: usize, parameters: &RenderParameters) {
-        // LFO/noiseはkey-off中も実時間で進む。FM operator演算だけを省き、
-        // sample単位の加算順序は通常経路と揃えてsave/load後も決定論的にする。
-        for _ in 0..frames {
-            self.advance_lfo(parameters.lfo_step);
-            self.advance_noise(parameters.noise_step);
-        }
-        for channel in &mut self.channels {
-            channel.feedback = [0.0; 2];
-        }
-    }
-
-    fn write(&mut self, offset: u32, value: u8) {
-        match offset & 3 {
-            1 => self.address = value,
-            3 => {
-                let register = self.address as usize;
-                self.registers[register] = value;
-                if register == 0x08 {
-                    let channel = usize::from(value & 7);
-                    for slot in 0..4 {
-                        let keyed = value & (1 << (slot + 3)) != 0;
-                        let operator = &mut self.channels[channel].operators[slot];
-                        if keyed {
-                            if operator.stage == 0 || operator.stage == 4 {
-                                operator.envelope = 0.0;
-                                // OPMはkey-onの立上りでphase generatorもresetする。
-                                operator.phase = 0.0;
-                                operator.stage = 1;
-                            }
-                        } else if operator.stage != 0 {
-                            operator.stage = 4;
-                        }
-                    }
-                } else if register == 0x14 {
-                    if value & 0x10 != 0 {
-                        self.status &= !1;
-                    }
-                    if value & 0x20 != 0 {
-                        self.status &= !2;
-                    }
-                } else if register == 0x19 {
-                    if value & 0x80 != 0 {
-                        self.phase_depth = value & 0x7f;
-                    } else {
-                        self.amplitude_depth = value & 0x7f;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn read(&self, offset: u32) -> u8 {
-        if offset & 3 == 3 { self.status } else { 0 }
-    }
-
-    fn tick(&mut self, cpu_cycles: u32, cpu_clock: u32) -> bool {
-        self.timer_fraction += u64::from(cpu_cycles) * 4_000_000;
-        let clocks = self.timer_fraction / u64::from(cpu_clock);
-        self.timer_fraction %= u64::from(cpu_clock);
-        let control = self.registers[0x14];
-        if control & 1 != 0 {
-            self.timer_a_counter += clocks;
-            let value =
-                (u16::from(self.registers[0x10]) << 2) | u16::from(self.registers[0x11] & 3);
-            let period = u64::from(1024 - value) * 64;
-            while self.timer_a_counter >= period.max(1) {
-                self.timer_a_counter -= period.max(1);
-                self.status |= 1;
-            }
-        }
-        if control & 2 != 0 {
-            self.timer_b_counter += clocks;
-            let period = u64::from(256 - u16::from(self.registers[0x12])) * 1024;
-            while self.timer_b_counter >= period.max(1) {
-                self.timer_b_counter -= period.max(1);
-                self.status |= 2;
-            }
-        }
-        self.status & ((control >> 2) & 3) != 0
-    }
-
-    fn render_parameters(&self, sample_rate: u32) -> RenderParameters {
-        const PITCH_SENSITIVITY: [f64; 8] = [0.0, 0.06, 0.12, 0.25, 0.5, 1.0, 2.0, 4.0];
-        // OPMのAMS 1/2/3は約23.9/47.8/95.6dB。
-        const AMPLITUDE_SENSITIVITY: [f64; 4] = [0.0, 1.0, 2.0, 4.0];
-        // OPMのoperator register順はM1,M2,C1,C2だが、algorithm計算は
-        // M1,C1,M2,C2の自然な接続順で保持する。
-        const REGISTER_SLOT: [usize; 4] = [0, 2, 1, 3];
-        let sample_rate = f64::from(sample_rate);
-        let channels = std::array::from_fn(|channel_index| {
-            let key_code = self.registers[0x28 + channel_index];
-            let base_frequency = channel_frequency(key_code, self.registers[0x30 + channel_index]);
-            let control = self.registers[0x20 + channel_index];
-            let sensitivity = self.registers[0x38 + channel_index];
-            let operators = std::array::from_fn(|slot| {
-                let register_offset = REGISTER_SLOT[slot] * 8 + channel_index;
-                let multiply = self.registers[0x40 + register_offset] & 0x0f;
-                let multiply = if multiply == 0 {
-                    0.5
-                } else {
-                    f64::from(multiply)
-                };
-                let total_level = self.registers[0x60 + register_offset] & 0x7f;
-                OperatorParameters {
-                    phase_step: TAU
-                        * base_frequency
-                        * multiply
-                        * operator_detune(&self.registers, register_offset)
-                        / sample_rate,
-                    attenuation: 10f64.powf(-(f64::from(total_level) * 0.75) / 20.0),
-                    amplitude_modulation: self.registers[0xa0 + register_offset] & 0x80 != 0,
-                    envelope: envelope_parameters(
-                        &self.registers,
-                        register_offset,
-                        key_code,
-                        sample_rate,
-                    ),
-                }
-            });
-            ChannelParameters {
-                control,
-                algorithm: control & 7,
-                pitch_sensitivity: PITCH_SENSITIVITY[usize::from(sensitivity >> 4 & 7)],
-                amplitude_sensitivity: AMPLITUDE_SENSITIVITY[usize::from(sensitivity & 3)],
-                operators,
-            }
-        });
-        let lfo_register = self.registers[0x18];
-        let lfo_frequency = 0.004
-            * f64::from(1u32 << u32::from(lfo_register >> 4))
-            * (1.0 + f64::from(lfo_register & 0x0f) / 16.0);
-        let noise_period = 32 - u32::from(self.registers[0x0f] & 0x1f);
-        RenderParameters {
-            channels,
-            lfo_step: lfo_frequency / sample_rate,
-            noise_step: 4_000_000.0 / (64.0 * f64::from(noise_period.max(1))) / sample_rate,
-        }
-    }
-
-    fn sample(&mut self, parameters: &RenderParameters) -> (f32, f32) {
-        let (lfo_pm, lfo_am) = self.advance_lfo(parameters.lfo_step);
-        let noise = self.advance_noise(parameters.noise_step);
-        let mut left = 0.0;
-        let mut right = 0.0;
-        for channel_index in 0..8 {
-            if self.channels[channel_index]
-                .operators
-                .iter()
-                .all(|operator| operator.stage == 0)
-            {
-                self.channels[channel_index].feedback = [0.0; 2];
-                continue;
-            }
-            let channel_parameters = &parameters.channels[channel_index];
-            let phase_semitones =
-                lfo_pm * f64::from(self.phase_depth) / 127.0 * channel_parameters.pitch_sensitivity;
-            let pitch_ratio = pitch_ratio(phase_semitones);
-            let amplitude_lfo = lfo_am * f64::from(self.amplitude_depth) / 127.0
-                * channel_parameters.amplitude_sensitivity;
-            let mut levels = [0.0; 4];
-            for slot in 0..4 {
-                let operator_parameters = &channel_parameters.operators[slot];
-                let operator = &mut self.channels[channel_index].operators[slot];
-                advance_envelope(operator, &operator_parameters.envelope);
-                operator.phase += operator_parameters.phase_step * pitch_ratio;
-                if operator.phase >= TAU {
-                    operator.phase -= TAU;
-                    if operator.phase >= TAU {
-                        operator.phase %= TAU;
-                    }
-                }
-                let am_gain = if operator_parameters.amplitude_modulation {
-                    amplitude_gain(amplitude_lfo)
-                } else {
-                    1.0
-                };
-                levels[slot] = operator.envelope * operator_parameters.attenuation * am_gain;
-            }
-            let feedback_level = (channel_parameters.control >> 3) & 7;
-            let feedback = if feedback_level == 0 {
-                0.0
-            } else {
-                const FEEDBACK_SCALE: [f64; 8] = [0.0, 0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0];
-                let history = self.channels[channel_index].feedback;
-                (history[0] + history[1]) * FEEDBACK_SCALE[usize::from(feedback_level)]
-            };
-            let phases =
-                std::array::from_fn(|slot| self.channels[channel_index].operators[slot].phase);
-            let (output, first) =
-                algorithm_output(channel_parameters.algorithm, phases, levels, feedback);
-            self.channels[channel_index].feedback[1] = self.channels[channel_index].feedback[0];
-            self.channels[channel_index].feedback[0] = first;
-            let output = if channel_index == 7 && self.registers[0x0f] & 0x80 != 0 {
-                // OPMのnoiseはchannel 7最終operatorを置換する。
-                output + noise * levels[3]
-            } else {
-                output
-            };
-            // OPM RL bitsはbit7=left、bit6=right。
-            if channel_parameters.control & 0x80 != 0 {
-                left += output;
-            }
-            if channel_parameters.control & 0x40 != 0 {
-                right += output;
-            }
-        }
-        ((left * 0.08) as f32, (right * 0.08) as f32)
-    }
-
-    fn advance_lfo(&mut self, step: f64) -> (f64, f64) {
-        self.lfo_phase += step;
-        if self.lfo_phase >= 1.0 {
-            self.lfo_phase %= 1.0;
-        }
-        match self.registers[0x1b] & 3 {
-            // 戻り値は(PMのbipolar値, AMのunipolar値)。
-            0 => (1.0 - self.lfo_phase * 2.0, 1.0 - self.lfo_phase),
-            1 => {
-                if self.lfo_phase < 0.5 {
-                    (1.0, 1.0)
-                } else {
-                    (-1.0, 0.0)
-                }
-            }
-            2 => (
-                1.0 - (self.lfo_phase * 4.0 - 2.0).abs(),
-                (self.lfo_phase * 2.0 - 1.0).abs(),
-            ),
-            _ => {
-                let value = f64::from((self.noise_lfsr & 0xffff) as u16) / 65535.0;
-                (value * 2.0 - 1.0, value)
-            }
-        }
-    }
-
-    fn advance_noise(&mut self, step: f64) -> f64 {
-        self.noise_phase += step;
-        while self.noise_phase >= 1.0 {
-            self.noise_phase -= 1.0;
-            let feedback = (self.noise_lfsr ^ (self.noise_lfsr >> 3)) & 1;
-            self.noise_lfsr = (self.noise_lfsr >> 1) | (feedback << 16);
-        }
-        if self.noise_lfsr & 1 == 0 { -1.0 } else { 1.0 }
-    }
-}
-
-fn channel_frequency(key_code: u8, key_fraction: u8) -> f64 {
-    const NOTES: [i16; 16] = [0, 1, 2, 2, 3, 4, 5, 5, 6, 7, 8, 8, 9, 10, 11, 11];
-    let octave = i16::from(key_code >> 4);
-    let note = NOTES[usize::from(key_code & 0x0f)];
-    let midi = 12 * (octave + 1) + note;
-    let fraction = f64::from(key_fraction >> 2) / 64.0;
-    440.0 * 2f64.powf((f64::from(midi) + fraction - 69.0) / 12.0)
-}
-
-fn envelope_parameters(
-    registers: &[u8],
-    offset: usize,
-    key_code: u8,
-    sample_rate: f64,
-) -> EnvelopeParameters {
-    let key_scale = registers[0x80 + offset] >> 6;
-    let key_rate = if key_scale == 0 {
-        0
-    } else {
-        (key_code >> (4 - key_scale)).min(31)
-    };
-    let effective_rate = |raw: u8| {
-        if raw == 0 {
-            0
-        } else {
-            raw.saturating_mul(2).saturating_add(key_rate).min(63)
-        }
-    };
-    let attack = effective_rate(registers[0x80 + offset] & 0x1f);
-    let decay = effective_rate(registers[0xa0 + offset] & 0x1f);
-    let sustain_rate = effective_rate(registers[0xc0 + offset] & 0x1f);
-    let sustain_level = (registers[0xe0 + offset] >> 4).min(15);
-    let release = ((registers[0xe0 + offset] & 0x0f) * 4 + 2)
-        .saturating_add(key_rate)
-        .min(63);
-    // Yamaha EGのrateは4増えるごとに概ね2倍速になる。0は停止で、
-    // attack 62/63だけはkey-on時に即座に最大levelへ到達する。
-    let duration = |rate: u8| 20.0 * 2f64.powf((4.0 - f64::from(rate)) / 4.0);
-    let decay_factor = |rate: u8| {
-        if rate == 0 {
-            1.0
-        } else {
-            // durationの間に60dB（amplitude 1/1000）減衰する係数。
-            (-std::f64::consts::LN_10 * 3.0 / (duration(rate) * sample_rate)).exp()
-        }
-    };
-    let attack_coefficient = if attack == 0 {
-        0.0
-    } else if attack >= 62 {
-        1.0
-    } else {
-        1.0 - (-6.0 / (duration(attack) * sample_rate)).exp()
-    };
-    let sustain_db = if sustain_level == 15 {
-        93.0
-    } else {
-        f64::from(sustain_level) * 3.0
-    };
-    EnvelopeParameters {
-        attack_coefficient,
-        decay_factor: decay_factor(decay),
-        sustain_factor: decay_factor(sustain_rate),
-        sustain_level: 10f64.powf(-sustain_db / 20.0),
-        release_factor: decay_factor(release),
-    }
-}
-
-fn advance_envelope(operator: &mut Operator, parameters: &EnvelopeParameters) {
-    match operator.stage {
-        1 => {
-            operator.envelope += (1.0 - operator.envelope) * parameters.attack_coefficient;
-            if operator.envelope >= 1.0 - 1e-9 {
-                operator.envelope = 1.0;
-                operator.stage = 2;
-            }
-        }
-        2 => {
-            operator.envelope *= parameters.decay_factor;
-            if operator.envelope <= parameters.sustain_level {
-                operator.envelope = parameters.sustain_level;
-                operator.stage = 3;
-            }
-        }
-        3 => operator.envelope *= parameters.sustain_factor,
-        4 => {
-            operator.envelope *= parameters.release_factor;
-            if operator.envelope < 1e-6 {
-                operator.envelope = 0.0;
-                operator.stage = 0;
-            }
-        }
-        _ => operator.envelope = 0.0,
-    }
-}
-
-const OPM_SINE_STEPS: usize = 1024;
-const MODULATION_STEPS_PER_SEMITONE: f64 = 256.0;
-const MODULATION_SEMITONES: f64 = 4.0;
-const MODULATION_TABLE_SIZE: usize =
-    (MODULATION_STEPS_PER_SEMITONE * MODULATION_SEMITONES * 2.0) as usize + 1;
-const AMPLITUDE_TABLE_SIZE: usize = 1025;
-
-fn opm_sine(phase: f64) -> f64 {
-    static TABLE: OnceLock<[f64; OPM_SINE_STEPS]> = OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        std::array::from_fn(|index| (TAU * index as f64 / OPM_SINE_STEPS as f64).sin())
-    });
-    let step = (phase * OPM_SINE_STEPS as f64 / TAU).floor() as i64;
-    table[(step & (OPM_SINE_STEPS as i64 - 1)) as usize]
-}
-
-fn pitch_ratio(semitones: f64) -> f64 {
-    if semitones == 0.0 {
-        return 1.0;
-    }
-    static TABLE: OnceLock<[f64; MODULATION_TABLE_SIZE]> = OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        std::array::from_fn(|index| {
-            let semitones = index as f64 / MODULATION_STEPS_PER_SEMITONE - MODULATION_SEMITONES;
-            2f64.powf(semitones / 12.0)
-        })
-    });
-    let index = ((semitones.clamp(-MODULATION_SEMITONES, MODULATION_SEMITONES)
-        + MODULATION_SEMITONES)
-        * MODULATION_STEPS_PER_SEMITONE)
-        .round() as usize;
-    table[index]
-}
-
-fn amplitude_gain(amplitude: f64) -> f64 {
-    static TABLE: OnceLock<[f64; AMPLITUDE_TABLE_SIZE]> = OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        std::array::from_fn(|index| {
-            let attenuation_db = index as f64 / 256.0 * 23.9;
-            10f64.powf(-attenuation_db / 20.0)
-        })
-    });
-    let index = (amplitude.clamp(0.0, 4.0) * 256.0).round() as usize;
-    table[index]
-}
-
-fn operator_detune(registers: &[u8], offset: usize) -> f64 {
-    const DT1_CENTS: [f64; 8] = [0.0, 3.4, 6.7, 10.0, 0.0, -3.4, -6.7, -10.0];
-    const DT2_CENTS: [f64; 4] = [0.0, 600.0, 781.0, 950.0];
-    let dt1 = usize::from(registers[0x40 + offset] >> 4 & 7);
-    let dt2 = usize::from(registers[0xc0 + offset] >> 6 & 3);
-    2f64.powf((DT1_CENTS[dt1] + DT2_CENTS[dt2]) / 1200.0)
-}
-
-fn algorithm_output(algorithm: u8, phase: [f64; 4], level: [f64; 4], feedback: f64) -> (f64, f64) {
-    let op =
-        |index: usize, modulation: f64| opm_sine(phase[index] + modulation * 4.0) * level[index];
-    let first = op(0, feedback);
-    let output = match algorithm {
-        0 => op(3, op(2, op(1, first))),
-        1 => op(3, op(2, first + op(1, 0.0))),
-        2 => op(3, first + op(2, op(1, 0.0))),
-        3 => op(3, op(1, first) + op(2, 0.0)),
-        4 => op(1, first) + op(3, op(2, 0.0)),
-        5 => op(1, first) + op(2, first) + op(3, first),
-        6 => op(1, first) + op(2, 0.0) + op(3, 0.0),
-        _ => first + op(1, 0.0) + op(2, 0.0) + op(3, 0.0),
-    };
-    (output, first)
-}
+use super::opm::Ym2151;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Msm6258 {
@@ -539,10 +37,6 @@ impl Default for Msm6258 {
 }
 
 impl Msm6258 {
-    fn silent(&self) -> bool {
-        !self.playing && self.current == 0
-    }
-
     fn write(&mut self, offset: u32, value: u8) {
         match offset {
             1 if value & 1 != 0 => self.playing = false,
@@ -640,6 +134,10 @@ struct AudioFrame {
 }
 
 impl AudioSystem {
+    pub(crate) fn diagnostics(&self) -> (u64, u64, u8, u16) {
+        self.ym2151.diagnostics()
+    }
+
     pub(crate) fn read_ym(&self, offset: u32) -> u8 {
         self.ym2151.read(offset)
     }
@@ -704,19 +202,13 @@ impl AudioSystem {
 
     pub(crate) fn generate(&mut self, frames: usize, sample_rate: u32, output: &mut Vec<f32>) {
         output.reserve(frames * 2);
-        // register write間ではOPM parameterは不変。pow/除算をsampleごとに
-        // 繰り返さず、frame内writeの直前でblockを分割する。
-        let parameters = self.ym2151.render_parameters(sample_rate);
-        if self.ym2151.silent() && self.msm6258.silent() {
-            self.ym2151.advance_silent(frames, &parameters);
-            output.resize(output.len() + frames * 2, 0.0);
-            return;
-        }
-        for _ in 0..frames {
-            let fm = self.ym2151.sample(&parameters);
+        let start = output.len();
+        self.ym2151.generate(frames, sample_rate, output);
+        for frame in 0..frames {
             let adpcm = self.msm6258.sample(sample_rate);
-            output.push((fm.0 + adpcm.0 * 0.5).clamp(-1.0, 1.0));
-            output.push((fm.1 + adpcm.1 * 0.5).clamp(-1.0, 1.0));
+            let offset = start + frame * 2;
+            output[offset] = (output[offset] + adpcm.0 * 0.5).clamp(-1.0, 1.0);
+            output[offset + 1] = (output[offset + 1] + adpcm.1 * 0.5).clamp(-1.0, 1.0);
         }
     }
 
@@ -862,6 +354,74 @@ mod tests {
     }
 
     #[test]
+    fn ym2151_native_trace_matches_ymfm_reference() {
+        let mut audio = AudioSystem::default();
+        for (register, value) in [(32, 199), (40, 76), (64, 1), (96, 0), (128, 31), (8, 120)] {
+            write_ym(&mut audio, register, value);
+        }
+        let mut samples = Vec::new();
+        audio.generate(32, 62_500, &mut samples);
+        let pcm = samples
+            .iter()
+            .map(|sample| (sample * 32768.0) as i16)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pcm,
+            [
+                426, 426, 874, 874, 1272, 1272, 1716, 1716, 2104, 2104, 2536, 2536, 2920, 2920,
+                3328, 3328, 3696, 3696, 4096, 4096, 4432, 4432, 4800, 4800, 5120, 5120, 5472, 5472,
+                5792, 5792, 6064, 6064, 6368, 6368, 6608, 6608, 6864, 6864, 7072, 7072, 7280, 7280,
+                7440, 7440, 7632, 7632, 7760, 7760, 7888, 7888, 7984, 7984, 8048, 8048, 8112, 8112,
+                8144, 8144, 8160, 8160, 8144, 8144, 8112, 8112,
+            ]
+        );
+    }
+
+    #[test]
+    fn ym2151_complex_native_trace_matches_ymfm_hash() {
+        use sha2::{Digest, Sha256};
+
+        let mut audio = AudioSystem::default();
+        for (register, value) in [
+            (0x20, 0xfd),
+            (0x28, 0x48),
+            (0x30, 0x80),
+            (0x38, 0x73),
+            (0x18, 0xc5),
+            (0x19, 0x40),
+            (0x19, 0xc0),
+            (0x1b, 0x02),
+        ] {
+            write_ym(&mut audio, register, value);
+        }
+        let offsets = [0, 8, 16, 24];
+        let values = [
+            [0x11, 0x22, 0x43, 0x74],
+            [0, 10, 15, 20],
+            [0x1f, 0x5c, 0x98, 0xd4],
+            [0x9a, 0x8e, 0x87, 0x83],
+            [0x0c, 0x48, 0x84, 0xc2],
+            [0x27, 0x49, 0x6b, 0x8d],
+        ];
+        for slot in 0..4 {
+            for (base, row) in [0x40, 0x60, 0x80, 0xa0, 0xc0, 0xe0].into_iter().zip(values) {
+                write_ym(&mut audio, base + offsets[slot], row[slot]);
+            }
+        }
+        write_ym(&mut audio, 0x08, 0x78);
+        let mut samples = Vec::new();
+        audio.generate(4096, 62_500, &mut samples);
+        let mut hash = Sha256::new();
+        for sample in samples {
+            hash.update(((sample * 32768.0) as i16).to_le_bytes());
+        }
+        assert_eq!(
+            format!("{:x}", hash.finalize()),
+            "3da75d9aae38d631004d0272f6fc0d6d9681502aee6b2dc8c260766ae67ca58d"
+        );
+    }
+
+    #[test]
     fn msm6258_decodes_nibbles_and_obeys_pan() {
         let mut audio = AudioSystem::default();
         audio.set_pan(0);
@@ -929,13 +489,12 @@ mod tests {
     #[test]
     fn ym2151_operator_register_order_matches_opm_wiring() {
         let mut chip = Ym2151::default();
-        chip.registers[0x68] = 20; // register bank M2
-        chip.registers[0x70] = 40; // register bank C1
-        let parameters = chip.render_parameters(48_000);
-        let expected_c1 = 10f64.powf(-(40.0 * 0.75) / 20.0);
-        let expected_m2 = 10f64.powf(-(20.0 * 0.75) / 20.0);
-        assert!((parameters.channels[0].operators[1].attenuation - expected_c1).abs() < 1e-12);
-        assert!((parameters.channels[0].operators[2].attenuation - expected_m2).abs() < 1e-12);
+        chip.write(1, 0x68);
+        chip.write(3, 20); // register bank M2
+        chip.write(1, 0x70);
+        chip.write(3, 40); // register bank C1
+        assert_eq!(chip.operator_total_level(0, 1), 40 << 3);
+        assert_eq!(chip.operator_total_level(0, 2), 20 << 3);
     }
 
     #[test]
@@ -944,14 +503,14 @@ mod tests {
         key_on_channel(&mut audio, 0, 7);
         let mut samples = Vec::new();
         audio.generate(16, 48_000, &mut samples);
-        let running_phase = audio.ym2151.channels[0].operators[0].phase;
-        assert!(running_phase > 0.0);
+        let running_phase = audio.ym2151.operator_phase(0, 0);
+        assert!(running_phase > 0);
 
         write_ym(&mut audio, 0x08, 0x78);
-        assert_eq!(audio.ym2151.channels[0].operators[0].phase, running_phase);
+        assert_eq!(audio.ym2151.operator_phase(0, 0), running_phase);
         write_ym(&mut audio, 0x08, 0x00);
         write_ym(&mut audio, 0x08, 0x78);
-        assert_eq!(audio.ym2151.channels[0].operators[0].phase, 0.0);
+        assert_eq!(audio.ym2151.operator_phase(0, 0), 0);
     }
 
     #[test]

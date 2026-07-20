@@ -130,6 +130,11 @@ impl Machine {
         self.bus.fdc_diagnostics()
     }
 
+    #[doc(hidden)]
+    pub fn audio_diagnostics(&self) -> (u64, u64, u8, u16) {
+        self.bus.audio_diagnostics()
+    }
+
     pub fn fdc_result_status(&self) -> [u8; 3] {
         self.bus.fdc_result_status()
     }
@@ -816,7 +821,7 @@ mod tests {
         );
         assert_eq!(
             first_pcm_hash,
-            "29dab4aba7bbd914a5387712d98b63f098c9ddb49f10f67fa9d97486a1aaa8c3"
+            "80375a7af0a7c73a4a47ef177b26b6c40bed27592c70a3c4908525e0c5257bdb"
         );
     }
 

@@ -1,6 +1,6 @@
 # X68S save-state format
 
-Version 8 is a self-contained snapshot of mutable emulator state, but it is
+Version 9 is a self-contained snapshot of mutable emulator state, but it is
 deliberately not a software archive. IPL, CGROM, SCSI ROM and original floppy/
 hard-disk bytes are never serialized into the payload.
 
@@ -19,6 +19,10 @@ SRAM, scheduler and copy-on-write overlays. On load, every manifest entry and
 hash must exactly match the ROM/media currently attached to the same slot.
 Only after that check does the core reattach the immutable bytes to the restored
 mutable state. A mismatch returns `MachineError::StateMediaMismatch`.
+
+Version 9 replaces the approximate floating-point OPM state with the YM2151
+integer phase/envelope and resampler state. Earlier snapshots are rejected
+rather than restoring an incompatible audio payload nondeterministically.
 
 This design prevents state export from silently redistributing user ROMs or
 disk images while still making state replay deterministic.

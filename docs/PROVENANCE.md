@@ -29,6 +29,13 @@ No CGROM, game, or other floppy/hard-disk image is included.
   (copyright Barry Rodewald, Carl and MAME contributors), and
   `src/devices/machine/mb87030.cpp` plus `.h` are the MB89352 register/phase
   reference (copyright Sven Schnelle).
+- ymfm, commit `17decfae857b92ab55fbb30ade2287ace095a381`
+  (BSD-3-Clause, copyright Aaron Giles): `ymfm_opm.cpp`, `ymfm_opm.h` and
+  `ymfm_fm.ipp` are the YM2151 phase, envelope, LFO/noise, operator wiring and
+  YM3012 quantization reference. `crates/x68k-core/src/devices/opm.rs` is a
+  safe Rust implementation; its sine attenuation, attenuation-to-volume,
+  phase-step, envelope-increment and detune lookup values are retained from
+  ymfm under the license in `licenses/ymfm-BSD-3-Clause.txt`.
 - SingleStepTests/m68000 (MIT), commit
   `64b253116a3de04aaac4346c43680960dc9b67e5`: CPU conformance corpus. Ten
   decoded representative JSON cases are bundled for PR checks; the complete
@@ -76,9 +83,10 @@ for register layout and behavioural comparison:
 - `crates/x68k-core/src/scheduler.rs` — timing constants and resolution mode
   comparison against `x68k/crtc.c` and `crtc.h`; the fractional event queue is
   an original Rust implementation.
-- `crates/x68k-core/src/devices/audio.rs` — register/timer and ADPCM behaviour
-  compared with `fmgen/opm.cpp`, `x68k/adpcm.c` and MAME YM2151/MSM6258 device
-  wiring. No fmgen source or lookup table was copied.
+- `crates/x68k-core/src/devices/audio.rs` — timer and ADPCM behaviour compared
+  with `fmgen/opm.cpp`, `x68k/adpcm.c` and MAME YM2151/MSM6258 device wiring.
+  The FM engine is isolated in `devices/opm.rs` and uses the separately listed
+  BSD-3-Clause ymfm reference; no fmgen source or lookup table was copied.
 - `crates/x68k-core/src/devices/hdc.rs` — SASI/SCSI phases and commands compared
   with `x68k/sasi.c`, `scsi.c` and MAME's `src/devices/machine/mb87030.cpp` and
   `.h` MB89352 register/phase implementation at the MAME commit recorded above.
