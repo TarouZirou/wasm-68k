@@ -14,7 +14,9 @@ type RomTarget = "ipl" | "cgrom" | "scsi";
 type LoadTarget = RomTarget | `fdd${0 | 1 | 2 | 3}` | "hdd0" | "state";
 // wasm-pack生成物がエディタ上で一世代古くても、Rust側の安定公開APIを型として
 // 保持する。実体の存在はPages E2Eで検証する。
-type Emulator = WebX68k & {
+type Emulator = Omit<WebX68k, "frame"> & {
+  /** 実機時間の1フレームを進めた場合にtrueを返す。 */
+  frame(timestamp: number): boolean;
   /** 起動後に処理したエミュレーションフレーム数を返す。 */
   frame_number(): bigint;
   /** 現在の論理解像度の横幅をピクセル単位で返す。 */
@@ -744,7 +746,11 @@ function animate(timestamp: number): void {
     requestAnimationFrame(animate);
     return;
   }
-  emulator.frame(timestamp);
+  const advanced = emulator.frame(timestamp);
+  if (!advanced) {
+    requestAnimationFrame(animate);
+    return;
+  }
   canvas.dataset.machineFrame = String(emulator.frame_number());
   const screenSize = `${emulator.screen_width()}x${emulator.screen_height()}`;
   if (screenSize !== lastScreenSize) {

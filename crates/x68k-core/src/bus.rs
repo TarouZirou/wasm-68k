@@ -437,12 +437,18 @@ impl Bus {
     }
 
     /// DMAチャネルが要求を受けて1単位転送できる状態かを返す。
-    fn dma_transfer_ready(&self, transfer: Transfer) -> bool {
+    fn dma_transfer_ready(&mut self, transfer: Transfer) -> bool {
         if transfer.source == FDC_BASE + 3 {
             return self.devices.fdc.dma_read_ready();
         }
         if transfer.destination == FDC_BASE + 3 {
             return self.devices.fdc.dma_write_ready();
+        }
+        if transfer.channel == 3 && transfer.destination == ADPCM_BASE + 3 {
+            // X68000ではMSM6258のVCLK 2回ごとにHD63450 channel 3へ
+            // 1byte分のDREQが入る。無条件転送すると全効果音を一瞬で消費し、
+            // DMA終了handlerがchipを止めてからhost PCMが生成されてしまう。
+            return self.devices.audio.take_adpcm_dma_request();
         }
         true
     }
@@ -500,13 +506,16 @@ impl Bus {
 
     /// CRTCが確定した最新のscanoutをMachine側へ渡す。hostの固定60Hzとは
     /// 独立しており、映像frameが未完成なら前回のframebufferを保持する。
-    pub fn take_scanout(&mut self, frame: &mut [u16]) -> Option<(u32, u32)> {
+    pub fn take_scanout(&mut self, frame: &mut [u16]) -> Option<(u32, u32, bool)> {
         if !std::mem::take(&mut self.frame_boundary_pending) {
             return None;
         }
         let length = (self.scanout_width * self.scanout_height) as usize;
-        frame[..length].copy_from_slice(&self.scanout_frame[..length]);
-        Some((self.scanout_width, self.scanout_height))
+        let changed = frame[..length] != self.scanout_frame[..length];
+        if changed {
+            frame[..length].copy_from_slice(&self.scanout_frame[..length]);
+        }
+        Some((self.scanout_width, self.scanout_height, changed))
     }
 
     /// 現在の映像状態を出力先へ描画し、表示に必要な変換を適用する。
@@ -673,6 +682,11 @@ impl Bus {
     /// `audio_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn audio_diagnostics(&self) -> (u64, u64, u8, u16) {
         self.devices.audio.diagnostics()
+    }
+
+    /// MSM6258のdata書込み、PLAY開始、DREQ転送状態を診断用に返す。
+    pub fn adpcm_diagnostics(&self) -> (u64, u64, u64, bool, usize) {
+        self.devices.audio.adpcm_diagnostics()
     }
 
     /// 現在の状態または入力から `fdc_result_status` に対応する値を算出し、副作用なく返す。
@@ -1715,6 +1729,22 @@ mod tests {
     }
 
     #[test]
+    /// 同じscanoutを再公開するときhost framebufferへのcopyを省くことを検証する。
+    fn unchanged_scanout_is_reported_without_copying_pixels() {
+        let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
+        bus.scanout_width = 2;
+        bus.scanout_height = 1;
+        bus.scanout_frame[..2].copy_from_slice(&[0x1234, 0x5678]);
+        let mut frame = vec![0; 2];
+
+        bus.frame_boundary_pending = true;
+        assert_eq!(bus.take_scanout(&mut frame), Some((2, 1, true)));
+        assert_eq!(frame, [0x1234, 0x5678]);
+        bus.frame_boundary_pending = true;
+        assert_eq!(bus.take_scanout(&mut frame), Some((2, 1, false)));
+    }
+
+    #[test]
     /// `printer_write_only_data_and_strobe_ports_are_mapped` が想定する振る舞いを満たし、回帰がないことを検証する。
     fn printer_write_only_data_and_strobe_ports_are_mapped() {
         let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
@@ -1906,6 +1936,37 @@ mod tests {
         bus.tick(32);
         assert_eq!(&bus.ram[0x200..0x204], &[1, 2, 3, 4]);
         assert_eq!(bus.devices.dma.read(0), 0x80);
+    }
+
+    #[test]
+    /// ADPCM接続のchannel 3がVCLK由来DREQごとに1byteだけ進むことを検証する。
+    fn adpcm_dma_waits_for_msm6258_byte_clock() {
+        let mut bus = Bus::new(&MachineConfig::default(), 1024 * 1024);
+        bus.ram[0x100..0x104].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        let base = 3 * 0x40;
+        bus.devices.dma.write(base + 0x06, 0x04); // MAR increment, DAR fixed
+        bus.devices.dma.write(base + 0x0a, 0);
+        bus.devices.dma.write(base + 0x0b, 4);
+        for (offset, value) in 0x0000_0100u32.to_be_bytes().into_iter().enumerate() {
+            bus.devices.dma.write(base + 0x0c + offset as u32, value);
+        }
+        for (offset, value) in (ADPCM_BASE + 3).to_be_bytes().into_iter().enumerate() {
+            bus.devices.dma.write(base + 0x14 + offset as u32, value);
+        }
+        bus.devices.dma.write(base + 0x07, 0x80);
+        assert!(bus.write_io(ADPCM_BASE + 1, 2));
+
+        // reset時rate=2 (8MHz/512)なので、10MHz CPUでは1byte=1280cycle。
+        bus.tick(1_279);
+        assert_eq!(bus.devices.dma.read(base + 0x0b), 4);
+        bus.tick(1);
+        assert_eq!(bus.devices.dma.read(base + 0x0b), 3);
+        assert_eq!(bus.adpcm_diagnostics().2, 1);
+
+        bus.tick(1_280 * 3);
+        assert_eq!(bus.devices.dma.read(base) & 0x80, 0x80);
+        assert_eq!(bus.adpcm_diagnostics().0, 4);
+        assert_eq!(bus.adpcm_diagnostics().2, 4);
     }
 
     #[test]

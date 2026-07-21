@@ -1,5 +1,5 @@
 // X68000 フレームバッファ描画シェーダ。
-// R16Uint テクスチャにアップロードされた GRBi ピクセルを RGB に変換して表示する。
+// Rg8Uint テクスチャにlittle-endianでアップロードされた GRBi ピクセルをRGBへ変換する。
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -58,7 +58,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let uv = clamp(raw_uv, vec2<f32>(0.0), vec2<f32>(1.0));
     let coord = min(vec2<u32>(uv * vec2<f32>(dims)), dims - vec2<u32>(1u, 1u));
-    let pixel = textureLoad(frame_tex, vec2<i32>(coord), 0).r;
+    let packed = textureLoad(frame_tex, vec2<i32>(coord), 0).rg;
+    let pixel = packed.r | (packed.g << 8u);
 
     // X68000 GRBi フォーマット: G(15-11) R(10-6) B(5-1) I(0)
     // 各チャネルは (5bit << 1) | I の 6bit としてデコードし、8bit に伸長する

@@ -7,7 +7,7 @@ use crate::bus::Bus;
 use crate::{MachineError, MachineModel};
 
 pub const MAGIC: &[u8; 4] = b"X68S";
-pub const VERSION: u16 = 9;
+pub const VERSION: u16 = 10;
 const FIXED_HEADER_SIZE: usize = 4 + 2 + 1 + 1;
 const HASH_SIZE: usize = 32;
 // A 12 MiB machine plus VRAM/devices currently serializes well below this

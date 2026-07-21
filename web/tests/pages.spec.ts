@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { chromium, expect, test, type Page } from "@playwright/test";
 
 interface DiagnosticReport {
   frame: number;
@@ -15,6 +15,11 @@ interface DiagnosticReport {
   fdc_st0: number;
   fdc_st1: number;
   fdc_st2: number;
+  adpcm_writes: number;
+  adpcm_starts: number;
+  adpcm_dma_transfers: number;
+  adpcm_playing: boolean;
+  adpcm_buffered: number;
   mouse_buttons: number;
   frame_sha256: string;
   audio_peak: number;
@@ -97,6 +102,92 @@ test("WebGL2 fallback initializes when WebGPU is unavailable", async ({ page }) 
   await page.goto("/wasm-68k/");
   await expect(page.locator("#status")).toContainText("準備完了");
   await expect(page.locator("#backend")).toContainText("webgl2");
+});
+
+test("WebGPU and WebGL2 produce the same diagnostic pixels", async ({ page: comparisonPage }, testInfo) => {
+  test.setTimeout(120_000);
+  const origin = String(testInfo.project.use.baseURL);
+
+  /** 指定backendで診断IPLを1frame描画し、compositor確定後のPNGを返す。 */
+  const capture = async (webgpu: boolean) => {
+    const browser = await chromium.launch({
+      headless: true,
+      args: webgpu
+        ? ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-angle=vulkan", "--disable-vulkan-surface"]
+        : ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+    });
+    try {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      if (!webgpu) {
+        await page.addInitScript(() => {
+          Object.defineProperty(Navigator.prototype, "gpu", {
+            configurable: true,
+            get: () => undefined,
+          });
+        });
+      }
+      await page.goto(`${origin}/wasm-68k/?autopause=1`);
+      await expect(page.locator("#status")).toContainText("準備完了");
+      await expect(page.locator("#backend")).toContainText(webgpu ? "webgpu" : "webgl2");
+      await page.locator("#diagnostic-rom").click();
+      await expect(page.locator("#screen")).toHaveAttribute("data-machine-frame", /^[1-9]\d*$/);
+      // WebGPU canvasはpresent後にbacking storeを破棄できるため、browser compositor
+      // が確定したlocator screenshotを通常画像へdecodeして比較する。
+      return (await page.locator("#screen").screenshot()).toString("base64");
+    } finally {
+      await browser.close();
+    }
+  };
+
+  const [gpu, gl] = await Promise.all([capture(true), capture(false)]);
+  const comparison = await comparisonPage.evaluate(async ([gpuPng, glPng]: string[]) => {
+    /** PNGをRGBAへ復号し、backend間の全画素比較に使う。 */
+    const decode = async (base64: string) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${base64}`;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("2D canvas is unavailable");
+      context.drawImage(image, 0, 0);
+      return {
+        width: canvas.width,
+        height: canvas.height,
+        rgba: context.getImageData(0, 0, canvas.width, canvas.height).data,
+      };
+    };
+    const [gpuImage, glImage] = await Promise.all([decode(gpuPng), decode(glPng)]);
+    let gpuNonBlack = 0;
+    let glNonBlack = 0;
+    let differingChannels = 0;
+    let maximumDifference = 0;
+    for (let offset = 0; offset < gpuImage.rgba.length; offset += 4) {
+      if (gpuImage.rgba[offset] || gpuImage.rgba[offset + 1] || gpuImage.rgba[offset + 2]) gpuNonBlack += 1;
+      if (glImage.rgba[offset] || glImage.rgba[offset + 1] || glImage.rgba[offset + 2]) glNonBlack += 1;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const difference = Math.abs(gpuImage.rgba[offset + channel] - glImage.rgba[offset + channel]);
+        if (difference) differingChannels += 1;
+        maximumDifference = Math.max(maximumDifference, difference);
+      }
+    }
+    return {
+      gpuSize: [gpuImage.width, gpuImage.height],
+      glSize: [glImage.width, glImage.height],
+      gpuNonBlack,
+      glNonBlack,
+      differingChannels,
+      maximumDifference,
+    };
+  }, [gpu, gl]);
+  expect(comparison.glSize).toEqual(comparison.gpuSize);
+  expect(comparison.gpuNonBlack).toBeGreaterThan(0);
+  // compositor境界の丸め差だけを許し、shader由来の面・色ずれは検出する。
+  expect(Math.abs(comparison.glNonBlack - comparison.gpuNonBlack)).toBeLessThan(100);
+  expect(comparison.differingChannels).toBeLessThan(100);
+  expect(comparison.maximumDifference).toBeLessThanOrEqual(64);
 });
 
 test("settings persist and display scaling stays pixel-exact", async ({ page }) => {
@@ -259,7 +350,7 @@ test("drag-and-drop mounts HDF and X68S state round-trips", async ({ page }) => 
   await expect(page.locator("#ipl-name")).toHaveText("合成診断IPL");
   const state = await readDownload(page, "#export-state");
   expect(state.subarray(0, 4).toString("ascii")).toBe("X68S");
-  expect(state.readUInt16LE(4)).toBe(9);
+  expect(state.readUInt16LE(4)).toBe(10);
 
   await page.locator("#import-state").click();
   await page.locator("#file-picker").setInputFiles({

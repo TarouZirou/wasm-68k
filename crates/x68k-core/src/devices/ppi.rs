@@ -54,7 +54,11 @@ impl Ppi {
     /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
     pub(crate) fn set_button(&mut self, port: u8, button: u8, pressed: bool) {
         let port = usize::from(port.min(1));
-        let bit = 4 + button.min(3);
+        // PPI read値のbit 4は常時highの予約線で、trigger A/Bはbit 5/6。
+        // 標準2button joystickに無い追加buttonは同じ線へaliasせず無視する。
+        let Some(bit) = (button < 2).then_some(5 + button) else {
+            return;
+        };
         self.set_active_low(port, bit, pressed);
     }
 
@@ -92,9 +96,23 @@ mod tests {
         let mut ppi = Ppi::default();
         ppi.set_axis(0, 0, -20_000);
         ppi.set_button(0, 0, true);
-        assert_eq!(ppi.read(1) & 0x14, 0);
+        assert_eq!(ppi.read(1) & 0x24, 0);
         ppi.set_axis(0, 0, 0);
         ppi.set_button(0, 0, false);
-        assert_eq!(ppi.read(1) & 0x1c, 0x1c);
+        assert_eq!(ppi.read(1) & 0x2c, 0x2c);
+    }
+
+    #[test]
+    /// button 0/1が予約bit 4ではなくtrigger A/Bへactive-lowで入ることを検証する。
+    fn joystick_buttons_use_trigger_a_and_b_bits() {
+        let mut ppi = Ppi::default();
+        ppi.set_button(0, 0, true);
+        ppi.set_button(0, 1, true);
+        assert_eq!(ppi.read(1) & 0x70, 0x10);
+        ppi.set_button(0, 2, false);
+        assert_eq!(ppi.read(1) & 0x70, 0x10);
+        ppi.set_button(0, 0, false);
+        ppi.set_button(0, 1, false);
+        assert_eq!(ppi.read(1) & 0x70, 0x70);
     }
 }

@@ -20,6 +20,8 @@ pub struct Machine {
     cpu: CpuCore,
     bus: Bus,
     framebuffer: Vec<u16>,
+    /// hostへ公開したGRBi内容または論理解像度が変わるたびに増える世代番号。
+    framebuffer_revision: u64,
     audio: Vec<f32>,
     audio_remainder: u32,
     cycle_remainder: u32,
@@ -94,6 +96,7 @@ impl Machine {
             config,
             cpu,
             framebuffer: vec![0; (MAX_SCREEN_WIDTH * MAX_SCREEN_HEIGHT) as usize],
+            framebuffer_revision: 0,
             audio: Vec::new(),
             audio_remainder: 0,
             cycle_remainder: 0,
@@ -117,6 +120,11 @@ impl Machine {
     /// 現在のGRBiフレームバッファを参照として返す。
     pub fn framebuffer(&self) -> &[u16] {
         &self.framebuffer[..(self.width * self.height) as usize]
+    }
+
+    /// hostが同一frameのGPU再転送を省くためのフレームバッファ世代を返す。
+    pub fn framebuffer_revision(&self) -> u64 {
+        self.framebuffer_revision
     }
 
     /// 現在のCRTC論理解像度を幅と高さの組で返す。
@@ -159,6 +167,11 @@ impl Machine {
     /// `audio_diagnostics` に対応する観測値を副作用なく収集し、診断または回帰試験用に返す。
     pub fn audio_diagnostics(&self) -> (u64, u64, u8, u16) {
         self.bus.audio_diagnostics()
+    }
+
+    /// MSM6258のdata書込み、PLAY開始、DREQ転送状態を診断用に返す。
+    pub fn adpcm_diagnostics(&self) -> (u64, u64, u64, bool, usize) {
+        self.bus.adpcm_diagnostics()
     }
 
     /// 現在の状態または入力から `fdc_result_status` に対応する値を算出し、副作用なく返す。
@@ -380,6 +393,7 @@ impl Machine {
         self.width = width.clamp(1, MAX_SCREEN_WIDTH);
         self.height = height.clamp(1, MAX_SCREEN_HEIGHT);
         self.framebuffer.fill(0);
+        self.framebuffer_revision = self.framebuffer_revision.wrapping_add(1);
     }
 
     /// 指定値を内部状態へ反映し、依存する設定や派生値も更新する。
@@ -497,9 +511,17 @@ impl Machine {
                     // CRTCが可視領域を走査し終えた瞬間のframeだけを公開する。
                     // この後のVBlank/raster IRQでsprite tableが書換え途中になっても、
                     // hostが次に表示するscanoutへ混入させない。
-                    if let Some((width, height)) = self.bus.take_scanout(&mut self.framebuffer) {
-                        self.width = width.clamp(1, MAX_SCREEN_WIDTH);
-                        self.height = height.clamp(1, MAX_SCREEN_HEIGHT);
+                    if let Some((width, height, pixels_changed)) =
+                        self.bus.take_scanout(&mut self.framebuffer)
+                    {
+                        let width = width.clamp(1, MAX_SCREEN_WIDTH);
+                        let height = height.clamp(1, MAX_SCREEN_HEIGHT);
+                        let dimensions_changed = (self.width, self.height) != (width, height);
+                        self.width = width;
+                        self.height = height;
+                        if pixels_changed || dimensions_changed {
+                            self.framebuffer_revision = self.framebuffer_revision.wrapping_add(1);
+                        }
                     }
                     if elapsed > remaining {
                         self.cpu_cycle_debt = self
@@ -604,6 +626,7 @@ impl Machine {
             self.height,
             self.frame_count,
         );
+        self.framebuffer_revision = self.framebuffer_revision.wrapping_add(1);
         Ok(())
     }
 }

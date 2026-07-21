@@ -1,6 +1,6 @@
 //! wgpu ベースのレンダラ。ネイティブ (Vulkan 等) と Wasm (WebGPU / WebGL2) で共用する。
 //!
-//! X68000 のフレームバッファ (16bit GRBi) を `R16Uint` テクスチャとしてアップロードし、
+//! X68000 のフレームバッファ (16bit GRBi) を `Rg8Uint` テクスチャとしてアップロードし、
 //! WGSL シェーダで RGB 変換とアスペクト比維持スケーリングを行う。
 //! WebGPU が使えない環境では wgpu の WebGL2 バックエンドに自動フォールバックする。
 
@@ -97,9 +97,23 @@ impl Renderer {
             .await
             .context("request_device")?;
 
-        let config = surface
+        let capabilities = surface.get_capabilities(&adapter);
+        let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
             .ok_or_else(|| anyhow!("surface is not supported by the adapter"))?;
+        // WebGPUとWebGL2でadapterの優先順が異なっても同じtransfer functionを
+        // 使う。非sRGB surfaceを選ぶとfallback側だけ中間色が暗く見える。
+        config.format = choose_surface_format(&capabilities.formats)
+            .ok_or_else(|| anyhow!("surface exposes no supported texture format"))?;
+        // requestAnimationFrameと別の即時present loopを作らず、browser compositorの
+        // VSyncへ統一する。静止frameの再送抑止と合わせてCPU wakeupを減らす。
+        config.present_mode = wgpu::PresentMode::Fifo;
+        if capabilities
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::Opaque)
+        {
+            config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+        }
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -352,7 +366,10 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R16Uint,
+            // WebGL2での16bit単一channel integer textureのdriver差を避けるため、
+            // GRBiの下位・上位byteを2つの8bit channelとして転送する。Wasmと
+            // 対応native targetはいずれもlittle-endianで、転送量は従来と同じ。
+            format: wgpu::TextureFormat::Rg8Uint,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -375,8 +392,21 @@ impl Renderer {
     }
 }
 
+/// backendの列挙順に依存せず、標準sRGB surfaceを優先して選択する。
+fn choose_surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
+    [
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    ]
+    .into_iter()
+    .find(|preferred| formats.contains(preferred))
+    .or_else(|| formats.iter().copied().find(wgpu::TextureFormat::is_srgb))
+    .or_else(|| formats.first().copied())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::choose_surface_format;
     use serde::Deserialize;
 
     #[derive(Deserialize)]
@@ -410,5 +440,21 @@ mod tests {
         for vector in vectors {
             assert_eq!(shader_integer_conversion(vector.grbi), vector.rgb);
         }
+    }
+
+    #[test]
+    /// WebGPU/WebGL2の列挙順にかかわらず同じsRGB形式を選ぶことを検証する。
+    fn surface_format_prefers_standard_srgb_on_every_backend() {
+        use wgpu::TextureFormat::{Bgra8Unorm, Bgra8UnormSrgb, Rgba8UnormSrgb};
+
+        assert_eq!(
+            choose_surface_format(&[Bgra8Unorm, Rgba8UnormSrgb, Bgra8UnormSrgb]),
+            Some(Bgra8UnormSrgb)
+        );
+        assert_eq!(
+            choose_surface_format(&[Bgra8Unorm, Rgba8UnormSrgb]),
+            Some(Rgba8UnormSrgb)
+        );
+        assert_eq!(choose_surface_format(&[Bgra8Unorm]), Some(Bgra8Unorm));
     }
 }

@@ -14,11 +14,21 @@ struct Msm6258 {
     playing: bool,
     predictor: i32,
     step: i32,
-    decoded: VecDeque<i16>,
+    encoded: VecDeque<u8>,
+    data_latch: u8,
+    nibble_shift: u8,
     current: i16,
     phase: f64,
     clock_select: u8,
     pan: u8,
+    dma_phase: u64,
+    dma_requests: u32,
+    #[serde(skip, default)]
+    data_writes: u64,
+    #[serde(skip, default)]
+    play_starts: u64,
+    #[serde(skip, default)]
+    dma_transfers: u64,
 }
 
 impl Default for Msm6258 {
@@ -26,13 +36,21 @@ impl Default for Msm6258 {
     fn default() -> Self {
         Self {
             playing: false,
-            predictor: 0,
+            predictor: -2,
             step: 0,
-            decoded: VecDeque::new(),
+            encoded: VecDeque::new(),
+            data_latch: 0,
+            nibble_shift: 0,
             current: 0,
             phase: 0.0,
-            clock_select: 0,
+            // PPI port Cのreset値0x0bはrate=2（8MHz/512）を選ぶ。
+            clock_select: 2,
             pan: 0x0b,
+            dma_phase: 0,
+            dma_requests: 0,
+            data_writes: 0,
+            play_starts: 0,
+            dma_transfers: 0,
         }
     }
 }
@@ -41,16 +59,46 @@ impl Msm6258 {
     /// 対象のメモリまたはレジスタへ値を書き込み、関連する副作用を反映する。
     fn write(&mut self, offset: u32, value: u8) {
         match offset {
-            1 if value & 1 != 0 => self.playing = false,
-            1 if value & 2 != 0 => {
-                self.playing = true;
-                self.predictor = 0;
-                self.step = 0;
-                self.decoded.clear();
+            1 if value & 1 != 0 => {
+                self.playing = false;
+                self.current = 0;
+                self.encoded.clear();
             }
-            3 if self.playing => {
-                self.decode(value & 0x0f);
-                self.decode(value >> 4);
+            1 if value & 2 != 0 => {
+                if !self.playing {
+                    self.playing = true;
+                    self.predictor = -2;
+                    self.step = 0;
+                    self.current = 0;
+                    self.nibble_shift = 0;
+                    self.play_starts = self.play_starts.wrapping_add(1);
+                }
+            }
+            1 => {
+                // PLAY bitを落とす書込みも停止命令になる。STOPだけを扱うと、
+                // Human68kのdriverがDMA終了後に無音化できず直流値を出し続ける。
+                self.playing = false;
+                self.current = 0;
+                self.encoded.clear();
+            }
+            3 => {
+                self.data_writes = self.data_writes.wrapping_add(1);
+                if self.playing {
+                    // DMAはVCLK 2回につき1byteを供給する。PCM生成はhostの
+                    // sample block単位なので、同じCPU slice内の複数byteをFIFOで
+                    // 保持する。無音実行が長く続いてもhost memoryを増やさない。
+                    const MAX_BUFFERED_BYTES: usize = 256;
+                    if self.encoded.len() == MAX_BUFFERED_BYTES {
+                        self.encoded.pop_front();
+                    }
+                    self.encoded.push_back(value);
+                } else {
+                    // 実chipのdata portは停止中にも書けるが、保持するのは最後の
+                    // 1byteだけである。PLAY直後の最初の2sampleに使用する。
+                    self.encoded.clear();
+                    self.data_latch = value;
+                    self.nibble_shift = 0;
+                }
             }
             _ => {}
         }
@@ -59,14 +107,14 @@ impl Msm6258 {
     /// 対象のメモリまたはレジスタを読み取り、規定の読出し副作用を反映して値を返す。
     fn read(&self, offset: u32) -> u8 {
         if offset == 1 {
-            if self.playing { 0xc0 } else { 0x40 }
+            if self.playing { 0x00 } else { 0x80 }
         } else {
             0
         }
     }
 
-    /// 入力を解析し、後続処理で利用できる正規化済みの結果を返す。
-    fn decode(&mut self, nibble: u8) {
+    /// 4bit ADPCM差分を予測値へ適用し、16bit PCMを返す。
+    fn decode(&mut self, nibble: u8) -> i16 {
         const INDEX_SHIFT: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
         const STEP_SIZE: [i32; 49] = [
             16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107,
@@ -91,28 +139,81 @@ impl Msm6258 {
         };
         self.predictor = self.predictor.clamp(-2048, 2047);
         self.step = (self.step + INDEX_SHIFT[usize::from(nibble & 7)]).clamp(0, 48);
-        self.decoded.push_back((self.predictor * 16) as i16);
+        (self.predictor * 16) as i16
     }
 
     /// MSM6258 ADPCMの現在信号を1サンプル進めて返す。
     fn sample(&mut self, sample_rate: u32) -> (f32, f32) {
         const RATES: [f64; 8] = [
-            7812.5, 10416.667, 15625.0, 10416.667, 3906.25, 5208.333, 7812.5, 5208.333,
+            7812.5,
+            10416.666_666_666_666,
+            15625.0,
+            15625.0,
+            3906.25,
+            5208.333_333_333_333,
+            7812.5,
+            7812.5,
         ];
-        if self.playing {
-            self.phase += RATES[usize::from(self.clock_select & 7)] / f64::from(sample_rate);
-            while self.phase >= 1.0 {
-                self.phase -= 1.0;
-                if let Some(sample) = self.decoded.pop_front() {
-                    self.current = sample;
-                }
+        if !self.playing {
+            return (0.0, 0.0);
+        }
+        self.phase += RATES[usize::from(self.clock_select & 7)] / f64::from(sample_rate);
+        while self.phase >= 1.0 {
+            self.phase -= 1.0;
+            if self.nibble_shift == 0
+                && let Some(data) = self.encoded.pop_front()
+            {
+                self.data_latch = data;
             }
+            let nibble = (self.data_latch >> self.nibble_shift) & 0x0f;
+            self.current = self.decode(nibble);
+            self.nibble_shift ^= 4;
         }
         let sample = f32::from(self.current) / 32768.0;
         (
-            if self.pan & 2 == 0 { sample } else { 0.0 },
             if self.pan & 1 == 0 { sample } else { 0.0 },
+            if self.pan & 2 == 0 { sample } else { 0.0 },
         )
+    }
+
+    /// CPU経過クロックからADPCMの1byte DREQパルス数を生成する。
+    fn tick_dma(&mut self, cycles: u32, cpu_clock: u32) {
+        const CHIP_CLOCKS: [u64; 2] = [8_000_000, 4_000_000];
+        const DIVIDERS: [u64; 4] = [1024, 768, 512, 512];
+        let chip_clock = CHIP_CLOCKS[usize::from((self.clock_select >> 2) & 1)];
+        let divider = DIVIDERS[usize::from(self.clock_select & 3)];
+        // 1byteはlow/highの2 VCLKを消費する。未使用パルスは保持せず、次の
+        // tickで上書きしてDMAC開始前のDREQを後からburst転送しない。
+        let threshold = u64::from(cpu_clock) * divider * 2;
+        let total = self
+            .dma_phase
+            .saturating_add(u64::from(cycles) * chip_clock);
+        self.dma_requests = (total / threshold).min(u64::from(u32::MAX)) as u32;
+        self.dma_phase = total % threshold;
+    }
+
+    /// 保留中のADPCM DREQを1パルス消費し、DMA転送可否を返す。
+    fn take_dma_request(&mut self) -> bool {
+        if self.dma_requests == 0 {
+            return false;
+        }
+        self.dma_requests -= 1;
+        self.dma_transfers = self.dma_transfers.wrapping_add(1);
+        true
+    }
+
+    /// クロック・分周設定を切り替え、旧周期の保留DREQを破棄する。
+    fn set_clock_select(&mut self, value: u8) {
+        const DIVIDERS: [u64; 4] = [1024, 768, 512, 512];
+        let value = value & 7;
+        if self.clock_select != value {
+            let old_divider = DIVIDERS[usize::from(self.clock_select & 3)];
+            let new_divider = DIVIDERS[usize::from(value & 3)];
+            // 実機timerと同様、設定変更時点まで進んだ周期の割合を維持する。
+            self.dma_phase = self.dma_phase.saturating_mul(new_divider) / old_divider;
+            self.clock_select = value;
+            self.dma_requests = 0;
+        }
     }
 }
 
@@ -144,6 +245,17 @@ impl AudioSystem {
         self.ym2151.diagnostics()
     }
 
+    /// ADPCMの書込み・再生開始・DMA転送状態を診断用に返す。
+    pub(crate) fn adpcm_diagnostics(&self) -> (u64, u64, u64, bool, usize) {
+        (
+            self.msm6258.data_writes,
+            self.msm6258.play_starts,
+            self.msm6258.dma_transfers,
+            self.msm6258.playing,
+            self.msm6258.encoded.len(),
+        )
+    }
+
     /// 対象のメモリまたはレジスタを読み取り、現在値を呼び出し側へ返す。
     pub(crate) fn read_ym(&self, offset: u32) -> u8 {
         self.ym2151.read(offset)
@@ -163,7 +275,8 @@ impl AudioSystem {
         }
         self.ym2151.write(offset, value);
         if offset & 3 == 3 && self.ym2151.address == 0x1b {
-            self.msm6258.clock_select = (value >> 5) & 4 | (self.msm6258.pan >> 2) & 3;
+            self.msm6258
+                .set_clock_select((value >> 5) & 4 | (self.msm6258.pan >> 2) & 3);
         }
     }
 
@@ -182,17 +295,24 @@ impl AudioSystem {
     pub(crate) fn set_pan(&mut self, value: u8) {
         self.render_to_cursor();
         self.msm6258.pan = value & 0x0f;
-        self.msm6258.clock_select = (self.msm6258.clock_select & 4) | ((value >> 2) & 3);
+        self.msm6258
+            .set_clock_select((self.msm6258.clock_select & 4) | ((value >> 2) & 3));
     }
 
     /// 経過CPUクロックをデバイス固有クロックへ変換し、タイマーと転送状態を進める。
     pub(crate) fn tick(&mut self, cycles: u32, cpu_clock: u32) -> bool {
         let irq = self.ym2151.tick(cycles, cpu_clock);
+        self.msm6258.tick_dma(cycles, cpu_clock);
         if self.frame.active {
             self.frame.elapsed_cycles = self.frame.elapsed_cycles.saturating_add(cycles);
             self.frame.instruction_offset = 0;
         }
         irq
+    }
+
+    /// ADPCMへ接続されたHD63450 channel 3用のDREQを1回消費する。
+    pub(crate) fn take_adpcm_dma_request(&mut self) -> bool {
+        self.msm6258.take_dma_request()
     }
 
     /// フレーム単位の音声サンプル収集を初期化する。
@@ -473,9 +593,49 @@ mod tests {
     fn msm6258_uses_the_chip_integer_difference_table() {
         let mut chip = Msm6258::default();
         chip.decode(0x07);
-        assert_eq!((chip.predictor, chip.step), (30, 8));
+        assert_eq!((chip.predictor, chip.step), (28, 8));
         chip.decode(0x0f);
-        assert_eq!((chip.predictor, chip.step), (-33, 16));
+        assert_eq!((chip.predictor, chip.step), (-35, 16));
+    }
+
+    #[test]
+    /// MSM6258のstatus、停止中data latch、PLAY解除を実chipの制御規則に合わせる。
+    fn msm6258_status_and_control_follow_play_state() {
+        let mut chip = Msm6258::default();
+        assert_eq!(chip.read(1), 0x80);
+        chip.pan = 0;
+        chip.write(3, 0x07);
+        chip.write(1, 0x02);
+        assert_eq!(chip.read(1), 0x00);
+        let samples = (0..4).map(|_| chip.sample(48_000).0).collect::<Vec<_>>();
+        assert!(samples.iter().any(|sample| *sample > 0.0));
+
+        chip.write(1, 0x00);
+        assert_eq!(chip.read(1), 0x80);
+        assert_eq!(chip.sample(48_000), (0.0, 0.0));
+    }
+
+    #[test]
+    /// PPI bit 0/1がそれぞれ左/右出力をmuteする配線を検証する。
+    fn msm6258_pan_bits_route_left_and_right() {
+        let mut chip = Msm6258::default();
+        chip.pan = 1;
+        chip.write(3, 0x77);
+        chip.write(1, 2);
+        let routed = (0..4).map(|_| chip.sample(48_000)).last().unwrap();
+        assert_eq!(routed.0, 0.0);
+        assert_ne!(routed.1, 0.0);
+    }
+
+    #[test]
+    /// 8MHz/512では10MHz CPUの1280cycleごとに1byte DREQを生成する。
+    fn msm6258_dma_request_uses_selected_vclk() {
+        let mut chip = Msm6258::default();
+        chip.tick_dma(1_279, 10_000_000);
+        assert!(!chip.take_dma_request());
+        chip.tick_dma(1, 10_000_000);
+        assert!(chip.take_dma_request());
+        assert!(!chip.take_dma_request());
     }
 
     #[test]

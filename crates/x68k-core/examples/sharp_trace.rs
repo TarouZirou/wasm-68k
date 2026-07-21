@@ -304,6 +304,13 @@ fn main() {
     println!(
         "ym_writes={ym_writes} ym_key_ons={ym_key_ons} ym_active={ym_active:02x} ym_peak={ym_peak}"
     );
+    let (adpcm_writes, adpcm_starts, adpcm_dma, adpcm_playing, adpcm_buffered) =
+        machine.adpcm_diagnostics();
+    let (dma_csr, dma_cer, dma_ocr, dma_ccr, dma_mtc, dma_mar, dma_dar) =
+        machine.dma_diagnostics(3);
+    println!(
+        "adpcm_writes={adpcm_writes} adpcm_starts={adpcm_starts} adpcm_dma={adpcm_dma} adpcm_playing={adpcm_playing} adpcm_buffered={adpcm_buffered} dma3={dma_csr:02x}/{dma_cer:02x}/{dma_ocr:02x}/{dma_ccr:02x}/mtc={dma_mtc:04x}/mar={dma_mar:08x}/dar={dma_dar:08x}"
+    );
     if let (Some(path), Some(samples)) = (std::env::var_os("X68K_AUDIO_WAV"), captured_audio) {
         write_pcm_wav(PathBuf::from(path), sample_rate, &samples);
     }

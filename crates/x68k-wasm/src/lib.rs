@@ -19,6 +19,7 @@ pub struct WebX68k {
     last_frame_timestamp: Option<f64>,
     frame_accumulator_ms: f64,
     needs_redraw: bool,
+    rendered_revision: u64,
 }
 
 #[wasm_bindgen]
@@ -53,11 +54,12 @@ impl WebX68k {
             last_frame_timestamp: None,
             frame_accumulator_ms: 0.0,
             needs_redraw: true,
+            rendered_revision: u64::MAX,
         })
     }
 
     /// 時刻差に対応するエミュレーションを進め、完成フレームをGPUへ転送する。
-    pub fn frame(&mut self, timestamp: f64) {
+    pub fn frame(&mut self, timestamp: f64) -> bool {
         const FRAME_MS: f64 = 1000.0 / 60.0;
         let mut advanced = false;
         match self.last_frame_timestamp.replace(timestamp) {
@@ -88,17 +90,24 @@ impl WebX68k {
         }
         // 120/144Hz displayでは同じ60Hz frameを2回以上送らない。texture全体の
         // upload、command encoder生成、presentを省けるためGPU/CPU負荷を抑えられる。
-        if !advanced && !self.needs_redraw {
-            return;
+        let revision = self.machine.framebuffer_revision();
+        if !self.needs_redraw && revision == self.rendered_revision {
+            return advanced;
         }
         let (width, height) = self.machine.screen_dimensions();
-        if let Err(error) = self
+        match self
             .renderer
             .render(self.machine.framebuffer(), width, height)
         {
-            web_sys::console::error_1(&JsValue::from_str(&format!("render error: {error:#}")));
+            Ok(()) => {
+                self.rendered_revision = revision;
+                self.needs_redraw = false;
+            }
+            Err(error) => {
+                web_sys::console::error_1(&JsValue::from_str(&format!("render error: {error:#}")));
+            }
         }
-        self.needs_redraw = false;
+        advanced
     }
 
     /// 表示サーフェスを新しい物理サイズへ再構成する。
@@ -335,9 +344,11 @@ impl WebX68k {
             self.machine.bus_fault_diagnostics();
         let (fdc_commands, fdc_sector_reads, fdc_command, fdc_status, fdc_output) =
             self.machine.fdc_diagnostics();
+        let (adpcm_writes, adpcm_starts, adpcm_dma_transfers, adpcm_playing, adpcm_buffered) =
+            self.machine.adpcm_diagnostics();
         let [fdc_st0, fdc_st1, fdc_st2] = self.machine.fdc_result_status();
         format!(
-            "{{\"version\":\"{}\",\"build\":\"{}\",\"model\":\"{}\",\"backend\":\"{}\",\"frame\":{},\"width\":{},\"height\":{},\"cpu_pc\":{},\"cpu_sr\":{},\"cpu_stopped\":{},\"cpu_sp\":{},\"exception_pc\":{},\"first_bus_fault\":{},\"last_bus_fault\":{},\"bus_fault_count\":{},\"fdc_commands\":{},\"fdc_sector_reads\":{},\"fdc_command\":{},\"fdc_status\":{},\"fdc_output\":{},\"fdc_st0\":{},\"fdc_st1\":{},\"fdc_st2\":{},\"mouse_buttons\":{},\"frame_sha256\":\"{}\",\"audio_peak\":{},\"content\":[{}]}}",
+            "{{\"version\":\"{}\",\"build\":\"{}\",\"model\":\"{}\",\"backend\":\"{}\",\"frame\":{},\"width\":{},\"height\":{},\"cpu_pc\":{},\"cpu_sr\":{},\"cpu_stopped\":{},\"cpu_sp\":{},\"exception_pc\":{},\"first_bus_fault\":{},\"last_bus_fault\":{},\"bus_fault_count\":{},\"fdc_commands\":{},\"fdc_sector_reads\":{},\"fdc_command\":{},\"fdc_status\":{},\"fdc_output\":{},\"fdc_st0\":{},\"fdc_st1\":{},\"fdc_st2\":{},\"adpcm_writes\":{},\"adpcm_starts\":{},\"adpcm_dma_transfers\":{},\"adpcm_playing\":{},\"adpcm_buffered\":{},\"mouse_buttons\":{},\"frame_sha256\":\"{}\",\"audio_peak\":{},\"content\":[{}]}}",
             env!("CARGO_PKG_VERSION"),
             option_env!("GITHUB_SHA").unwrap_or("local"),
             self.machine.config().model.name(),
@@ -361,6 +372,11 @@ impl WebX68k {
             fdc_st0,
             fdc_st1,
             fdc_st2,
+            adpcm_writes,
+            adpcm_starts,
+            adpcm_dma_transfers,
+            adpcm_playing,
+            adpcm_buffered,
             self.machine.mouse_buttons_diagnostics(),
             hex(&self.machine.framebuffer_hash()),
             self.last_audio_peak,
