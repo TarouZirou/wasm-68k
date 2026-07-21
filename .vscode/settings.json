@@ -1,8 +1,12 @@
 {
-  "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
-  "rust-analyzer.check.targets": ["wasm32-unknown-unknown"],
-  "rust-analyzer.cargo.extraEnv": {
-    "RUSTFLAGS": "--cfg=web_sys_unstable_apis"
+  "files.exclude": {
+    "**/target": true
+  },
+  "files.watcherExclude": {
+    "**/target/**": true
+  },
+  "search.exclude": {
+    "**/target": true
   },
   "typescript.tsdk": "web/node_modules/typescript/lib"
 }

@@ -46,6 +46,15 @@ async function readDownload(page: Page, selector: string): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+/** GPUのpresent後にbrowser compositorがcanvasを取り込むまで待機する。 */
+async function waitForCompositor(page: Page): Promise<void> {
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    // machine frameの属性更新はGPU処理完了より先に起こる。2回の描画機会を
+    // またいでから撮影し、backendごとに旧surfaceを読む競合を防ぐ。
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+}
+
 test("Pages base path loads Wasm and AudioWorklet", async ({ page }) => {
   const loaded = new Set<string>();
   page.on("response", (response) => {
@@ -132,6 +141,7 @@ test("WebGPU and WebGL2 produce the same diagnostic pixels", async ({ page: comp
       await expect(page.locator("#backend")).toContainText(webgpu ? "webgpu" : "webgl2");
       await page.locator("#diagnostic-rom").click();
       await expect(page.locator("#screen")).toHaveAttribute("data-machine-frame", /^[1-9]\d*$/);
+      await waitForCompositor(page);
       // WebGPU canvasはpresent後にbacking storeを破棄できるため、browser compositor
       // が確定したlocator screenshotを通常画像へdecodeして比較する。
       return (await page.locator("#screen").screenshot()).toString("base64");
